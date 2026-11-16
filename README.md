@@ -1,2 +1,1 @@
-# HexAIRadio-BROWSE
-HexAIRadio-BROWSE
+# HexAIRadio-BROWSER
