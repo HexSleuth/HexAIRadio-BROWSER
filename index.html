@@ -342,16 +342,18 @@ img.gif-safe{image-rendering:auto;-webkit-user-drag:none;user-select:none;pointe
 .modal[hidden]{display:none}
 .modal-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.8);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);animation:fadeIn .2s ease}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-.modal-card{position:relative;width:min(520px,calc(100vw - 32px));background:var(--bg-3);border:1px solid var(--border);border-radius:14px;overflow:hidden;box-shadow:0 40px 90px rgba(0,0,0,.9);animation:modalIn .25s ease}
+.modal-card{position:relative;width:min(520px,calc(100vw - 32px));background:var(--bg-3);border:1px solid var(--border);border-radius:14px;box-shadow:0 40px 90px rgba(0,0,0,.9);animation:modalIn .25s ease}
+.radio-card{overflow:visible!important;}
+.settings-card{overflow:hidden;}
 @keyframes modalIn{from{opacity:0;transform:translateY(16px) scale(.97)}to{opacity:1;transform:none}}
-.modal-head{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--border)}
+.modal-head{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--border); border-radius:14px 14px 0 0;}
 .modal-head h3{font-size:18px;font-weight:800;letter-spacing:-.02em;display:flex;align-items:center;gap:11px}
 .modal-head h3 i{color:var(--green);font-size:16px}
-.modal-body{padding:24px;display:flex;flex-direction:column;gap:14px;color:var(--muted);font-size:14px;line-height:1.65;max-height:60vh;overflow-y:auto}
+.modal-body{padding:24px;display:flex;flex-direction:column;gap:14px;color:var(--muted);font-size:14px;line-height:1.65;max-height:60vh;overflow-y:auto; border-radius:0 0 14px 14px;}
 .modal-body b{color:#fff;font-weight:700}
 .modal-body a{color:var(--green-hi)}
 .modal-fine{font-size:12px;color:var(--muted-2);font-style:italic}
-.modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:16px 24px;background:rgba(0,0,0,.35);border-top:1px solid var(--border)}
+.modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:16px 24px;background:rgba(0,0,0,.35);border-top:1px solid var(--border); border-radius:0 0 14px 14px;}
 
 .fa-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:4px 0 6px}
 .fa-card{display:flex;align-items:center;gap:11px;padding:12px 13px;border-radius:10px;background:rgba(255,255,255,.04);border:1px solid var(--border);font-size:12.5px;font-weight:600;color:#fff;transition:background .15s,border-color .15s,transform .15s}
@@ -382,7 +384,7 @@ img.gif-safe{image-rendering:auto;-webkit-user-drag:none;user-select:none;pointe
 
 /* Radio sleuth */
 .radio-card{width:min(560px,calc(100vw - 24px))}
-.radio-body-wrap{padding:20px 24px 24px!important;gap:14px!important;max-height:74vh!important;align-items:center;text-align:center}
+.radio-body-wrap{padding:20px 24px 24px!important;gap:14px!important;max-height:74vh!important;overflow:visible!important;align-items:center;text-align:center}
 .radio-stage{position:relative;width:100%;max-width:400px;margin:0 auto;padding:30px 0 22px;display:grid;place-items:center}
 .radio-waves{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none}
 .radio-waves i{position:absolute;width:130px;height:130px;border-radius:50%;border:2px solid rgba(29,185,84,.55);opacity:0}
@@ -778,8 +780,13 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
         <button class="btn" id="btn-radio-stop"><i class="fa-solid fa-stop"></i> Stop</button>
         
         <div style="position:relative; display:inline-block;" id="open-source-dropdown">
-          <button class="btn btn-ghost" id="btn-radio-open"><i class="fa-solid fa-up-right-from-square"></i> Open Source <i class="fa-solid fa-caret-down" style="margin-left:4px; font-size:11px;"></i></button>
-          <div id="radio-open-menu" hidden style="position:absolute; bottom:calc(100% + 12px); right:0; background:var(--bg-3); border:1px solid var(--border); border-radius:10px; padding:8px; z-index:200; min-width:240px; box-shadow:0 14px 40px rgba(0,0,0,.9); display:flex; flex-direction:column; gap:4px; text-align:left;">
+          <button class="btn btn-ghost" id="btn-radio-open" aria-haspopup="true" aria-expanded="false"><i class="fa-solid fa-up-right-from-square"></i> Open Source <i class="fa-solid fa-caret-down" style="margin-left:4px; font-size:11px;"></i></button>
+          <div id="radio-open-menu" style="display:none; position:absolute; bottom:100%; right:0; margin-bottom:8px; background:var(--bg-3); border:1px solid var(--border); border-radius:10px; padding:8px; z-index:9999; min-width:240px; box-shadow:0 14px 40px rgba(0,0,0,.9); flex-direction:column; gap:4px; text-align:left;">
+            <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); padding:6px 12px 8px; font-weight:700;">Station Source</div>
+            <a href="#" id="btn-station-source" class="os-link" style="padding:10px 12px; font-size:13px; font-weight:600; color:var(--green-hi); text-decoration:none; border-radius:6px; transition:background 0.15s; display:flex; align-items:center; gap:10px;" onmouseover="this.style.background='rgba(255,255,255,.08)'" onmouseout="this.style.background='transparent'"><i class="fa-solid fa-satellite-dish" style="color:var(--green)"></i> Current Station</a>
+            
+            <div style="height:1px; background:var(--border); margin:4px 0;"></div>
+            
             <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); padding:6px 12px 8px; font-weight:700;">HEX Multi-Links</div>
             <a href="https://hexsleuth.github.io/HEX-RADIO/" target="_blank" class="os-link" style="padding:10px 12px; font-size:13px; font-weight:600; color:#fff; text-decoration:none; border-radius:6px; transition:background 0.15s; display:flex; align-items:center; gap:10px;" onmouseover="this.style.background='rgba(255,255,255,.08)'" onmouseout="this.style.background='transparent'"><i class="fa-solid fa-link" style="color:var(--green)"></i> HEX RADIO</a>
             <a href="https://hexsleuth.github.io/FM-Radio/" target="_blank" class="os-link" style="padding:10px 12px; font-size:13px; font-weight:600; color:#fff; text-decoration:none; border-radius:6px; transition:background 0.15s; display:flex; align-items:center; gap:10px;" onmouseover="this.style.background='rgba(255,255,255,.08)'" onmouseout="this.style.background='transparent'"><i class="fa-solid fa-link" style="color:var(--green)"></i> FM Radio</a>
@@ -1879,25 +1886,41 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
       $('#radio-status').textContent = 'Stopped';
     };
     
-    // Open Source dropdown logic
-    $('#btn-radio-open').onclick = (e) => { 
-      e.stopPropagation(); 
-      const m = $('#radio-open-menu'); 
-      m.hidden = !m.hidden; 
-    };
-    
-    $$('#radio-open-menu a').forEach(link => {
-      link.addEventListener('click', () => {
-        $('#radio-open-menu').hidden = true;
+    // Open Source dropdown logic safely attached via addEventListener
+    const btnOpen = $('#btn-radio-open');
+    const menuOpen = $('#radio-open-menu');
+    if (btnOpen && menuOpen) {
+      btnOpen.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        menuOpen.style.display = (menuOpen.style.display === 'none' || menuOpen.style.display === '') ? 'flex' : 'none';
       });
-    });
-
-    document.addEventListener('click', (e) => {
-      const m = $('#radio-open-menu');
-      if (m && !m.hidden && !e.target.closest('#open-source-dropdown')) {
-        m.hidden = true;
+      
+      const btnStationSource = $('#btn-station-source');
+      if (btnStationSource) {
+        btnStationSource.addEventListener('click', (e) => {
+          e.preventDefault();
+          if (S.station) {
+            window.open(S.station.homepage || S.station.url_resolved || S.station.url, '_blank');
+          } else {
+            toast('No station currently loaded');
+          }
+          menuOpen.style.display = 'none';
+        });
       }
-    });
+
+      $$('#radio-open-menu a[target="_blank"]').forEach(link => {
+        link.addEventListener('click', () => {
+          menuOpen.style.display = 'none';
+        });
+      });
+
+      document.addEventListener('click', (e) => {
+        if (menuOpen.style.display !== 'none' && !e.target.closest('#open-source-dropdown')) {
+          menuOpen.style.display = 'none';
+        }
+      });
+    }
 
     bindModals();
 
