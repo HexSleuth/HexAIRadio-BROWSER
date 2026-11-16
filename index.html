@@ -669,7 +669,7 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
 
   <footer class="dock">
     <div class="dock-left">
-      <div class="dock-art" id="dock-art" title="Open station"><img id="dock-art-img" src="" alt=""></div>
+      <div class="dock-art" id="dock-art" title="Open station"><img id="dock-art-img" src="https://raw.githubusercontent.com/HexSleuth/HexAIRadio-BROWSER/main/Avatar.gif" alt=""></div>
       <div class="dock-meta">
         <button class="dock-title" id="dock-title">HEXAIRADIO-BROWSER</button>
         <span class="dock-artist" id="dock-artist">Pick a station to start listening</span>
@@ -776,7 +776,16 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
       <div class="radio-actions">
         <button class="btn btn-primary" id="btn-radio-tune"><i class="fa-solid fa-satellite-dish"></i> Fetch &amp; Tune</button>
         <button class="btn" id="btn-radio-stop"><i class="fa-solid fa-stop"></i> Stop</button>
-        <button class="btn btn-ghost" id="btn-radio-open"><i class="fa-solid fa-up-right-from-square"></i> Open Source</button>
+        
+        <div style="position:relative; display:inline-block;" id="open-source-dropdown">
+          <button class="btn btn-ghost" id="btn-radio-open"><i class="fa-solid fa-up-right-from-square"></i> Open Source <i class="fa-solid fa-caret-down" style="margin-left:4px; font-size:11px;"></i></button>
+          <div id="radio-open-menu" hidden style="position:absolute; bottom:calc(100% + 12px); right:0; background:var(--bg-3); border:1px solid var(--border); border-radius:10px; padding:8px; z-index:200; min-width:240px; box-shadow:0 14px 40px rgba(0,0,0,.9); display:flex; flex-direction:column; gap:4px; text-align:left;">
+            <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); padding:6px 12px 8px; font-weight:700;">HEX Multi-Links</div>
+            <a href="https://hexsleuth.github.io/HEX-RADIO/" target="_blank" class="os-link" style="padding:10px 12px; font-size:13px; font-weight:600; color:#fff; text-decoration:none; border-radius:6px; transition:background 0.15s; display:flex; align-items:center; gap:10px;" onmouseover="this.style.background='rgba(255,255,255,.08)'" onmouseout="this.style.background='transparent'"><i class="fa-solid fa-link" style="color:var(--green)"></i> HEX RADIO</a>
+            <a href="https://hexsleuth.github.io/FM-Radio/" target="_blank" class="os-link" style="padding:10px 12px; font-size:13px; font-weight:600; color:#fff; text-decoration:none; border-radius:6px; transition:background 0.15s; display:flex; align-items:center; gap:10px;" onmouseover="this.style.background='rgba(255,255,255,.08)'" onmouseout="this.style.background='transparent'"><i class="fa-solid fa-link" style="color:var(--green)"></i> FM Radio</a>
+            <a href="https://hexsleuth.github.io/HEX-AI-RADIO-Browser/" target="_blank" class="os-link" style="padding:10px 12px; font-size:13px; font-weight:600; color:#fff; text-decoration:none; border-radius:6px; transition:background 0.15s; display:flex; align-items:center; gap:10px;" onmouseover="this.style.background='rgba(255,255,255,.08)'" onmouseout="this.style.background='transparent'"><i class="fa-solid fa-link" style="color:var(--green)"></i> HEX-AI-RADIO Browser</a>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -1318,16 +1327,18 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
 
   function updateDock() {
     const st = S.station;
-    $('#dock-title').textContent = st ? st.name : 'HEX RADIO';
+    $('#dock-title').textContent = st ? st.name : 'HEXAIRADIO-BROWSER';
     $('#dock-artist').textContent = st ? (st.country || 'Live radio') : 'Pick a station to start listening';
     const img = $('#dock-art-img');
     if (st?.favicon) {
       img.src = st.favicon;
-      img.style.display = 'block';
-      img.referrerPolicy = 'no-referrer';
-      img.decoding = 'async';
-      img.className = 'gif-safe';
-    } else img.style.display = 'none';
+    } else {
+      img.src = ART;
+    }
+    img.style.display = 'block';
+    img.referrerPolicy = 'no-referrer';
+    img.decoding = 'async';
+    img.className = 'gif-safe';
     updatePlayBtn();
   }
 
@@ -1867,7 +1878,26 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
       $('#radio-stage').classList.remove('loading','done');
       $('#radio-status').textContent = 'Stopped';
     };
-    $('#btn-radio-open').onclick = () => { if (S.station) window.open(S.station.homepage || S.station.url_resolved, '_blank'); };
+    
+    // Open Source dropdown logic
+    $('#btn-radio-open').onclick = (e) => { 
+      e.stopPropagation(); 
+      const m = $('#radio-open-menu'); 
+      m.hidden = !m.hidden; 
+    };
+    
+    $$('#radio-open-menu a').forEach(link => {
+      link.addEventListener('click', () => {
+        $('#radio-open-menu').hidden = true;
+      });
+    });
+
+    document.addEventListener('click', (e) => {
+      const m = $('#radio-open-menu');
+      if (m && !m.hidden && !e.target.closest('#open-source-dropdown')) {
+        m.hidden = true;
+      }
+    });
 
     bindModals();
 
