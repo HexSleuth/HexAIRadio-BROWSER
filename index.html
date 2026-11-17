@@ -1055,7 +1055,7 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
       card.innerHTML = `
         <div class="card-art">
           ${liveBadge(st)}
-          ${icon ? `<img src="${esc(icon)}" loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" class="gif-safe" onerror="this.style.display='none'">` : ''}
+          ${icon ? `<img src="${esc(icon)}" loading="lazy" decoding="async" alt="" referrerpolicy="no-referrer" class="gif-safe" onerror="this.onerror=null;this.src='https://raw.githubusercontent.com/HexSleuth/HexAIRadio-BROWSER/main/Avatar.gif';">` : `<img src="https://raw.githubusercontent.com/HexSleuth/HexAIRadio-BROWSER/main/Avatar.gif" loading="lazy" decoding="async" alt="" class="gif-safe">`}
           <button class="card-play" aria-label="Play"><i class="fa-solid fa-play"></i></button>
         </div>
         <div class="card-title" title="${esc(st.name)}">${esc(st.name)}</div>
@@ -1082,7 +1082,7 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
     const now = new Date();
     const h = now.getHours();
     const greet = h < 5 ? 'Good night' : h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : h < 21 ? 'Good evening' : 'Good night';
-    const time = now.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    const time = now.toLocaleTimeString([], { hour:'numeric', minute:'2-digit', second:'2-digit', hour12:true });
     const el = $('#greeting');
     if (el) el.innerHTML = `${greet} <span style="color:var(--muted);font-weight:400;font-size:.62em;margin-left:12px;letter-spacing:.02em;font-variant-numeric:tabular-nums">${time}</span>`;
   }
@@ -1346,6 +1346,7 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
     img.referrerPolicy = 'no-referrer';
     img.decoding = 'async';
     img.className = 'gif-safe';
+    img.onerror = function() { this.onerror=null; this.src = ART; };
     updatePlayBtn();
   }
 
@@ -1360,7 +1361,11 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
       art.decoding = 'async';
       art.className = 'gif-safe';
       art.style.display = 'block';
-    } else art.style.display = 'none';
+      art.onerror = function() { this.onerror=null; this.src = ART; };
+    } else {
+      art.src = ART;
+      art.style.display = 'block';
+    }
     const site = $('#st-site');
     if (st.homepage) { site.href = st.homepage; site.hidden = false; } else site.hidden = true;
 
@@ -1372,7 +1377,7 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
         <div class="tl-row" data-idx="${start + i}">
           <div class="tl-num">${start + i + 1}</div>
           <div class="tl-main">
-            <div class="tl-art">${q.favicon ? `<img src="${esc(q.favicon)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="gif-safe" onerror="this.style.display='none'">` : ''}</div>
+            <div class="tl-art">${q.favicon ? `<img src="${esc(q.favicon)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="gif-safe" onerror="this.onerror=null;this.src='https://raw.githubusercontent.com/HexSleuth/HexAIRadio-BROWSER/main/Avatar.gif';">` : `<img src="https://raw.githubusercontent.com/HexSleuth/HexAIRadio-BROWSER/main/Avatar.gif" class="gif-safe" alt="">`}</div>
             <div class="tl-info"><div class="tl-title">${esc(q.name)}</div><div class="tl-artist">${esc(q.country||'')}</div></div>
           </div>
           <div class="tl-album">${esc((q.tags||'').split(',')[0]||'')}</div>
@@ -1437,7 +1442,7 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
       list.innerHTML = data.map((st, i) => `
         <div class="chart-row" data-i="${i}">
           <div class="chart-rank">${i+1}</div>
-          <div class="chart-art">${st.favicon ? `<img src="${esc(st.favicon)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="gif-safe" onerror="this.style.display='none'">` : `<i class="fa-solid fa-radio"></i>`}</div>
+          <div class="chart-art">${st.favicon ? `<img src="${esc(st.favicon)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="gif-safe" onerror="this.onerror=null;this.src='https://raw.githubusercontent.com/HexSleuth/HexAIRadio-BROWSER/main/Avatar.gif';">` : `<img src="https://raw.githubusercontent.com/HexSleuth/HexAIRadio-BROWSER/main/Avatar.gif" class="gif-safe" alt="">`}</div>
           <div class="chart-main"><div class="chart-title">${esc(st.name)}</div><div class="chart-artist">${esc(st.country || '')} · ${esc((st.tags||'').split(',')[0]||'Radio')}</div></div>
           <button class="chart-go" aria-label="Play"><i class="fa-solid fa-play"></i></button>
         </div>`).join('');
@@ -1835,7 +1840,7 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
       if (!S.queue.length) { body.innerHTML = `<div class="side-empty">No history yet. Play a station first.</div>`; return; }
       body.innerHTML = S.queue.map((q, i) => `
         <div class="queue-item${i === S.qIdx ? ' current' : ''}" data-i="${i}">
-          <div class="queue-art">${q.favicon ? `<img src="${esc(q.favicon)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="gif-safe">` : ''}</div>
+          <div class="queue-art">${q.favicon ? `<img src="${esc(q.favicon)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="gif-safe" onerror="this.onerror=null;this.src='https://raw.githubusercontent.com/HexSleuth/HexAIRadio-BROWSER/main/Avatar.gif';">` : `<img src="https://raw.githubusercontent.com/HexSleuth/HexAIRadio-BROWSER/main/Avatar.gif" class="gif-safe" alt="">`}</div>
           <div class="queue-meta"><div class="queue-title">${esc(q.name)}</div><div class="queue-sub">${esc(q.country||'')}</div></div>
         </div>`).join('');
       body.querySelectorAll('.queue-item').forEach(r => r.onclick = () => playStation(S.queue[+r.dataset.i]));
