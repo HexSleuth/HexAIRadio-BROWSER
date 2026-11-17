@@ -491,6 +491,15 @@ img.gif-safe{image-rendering:auto;-webkit-user-drag:none;user-select:none;pointe
 .feed-loading{padding:18px 14px;text-align:center;color:var(--muted);font-size:11.5px}
 .feed-loading i{color:var(--green);margin-right:6px}
 
+/* Equalizer styles */
+.eq-sliders { display: flex; justify-content: space-between; gap: 8px; margin-top:16px; padding: 0 10px; }
+.eq-col { display: flex; flex-direction: column; align-items: center; gap: 10px; flex: 1; min-width:0; }
+.eq-slider-wrap { height: 130px; display: flex; justify-content: center; width:100%; position:relative; }
+.eq-slider { writing-mode: bt-lr; -webkit-appearance: slider-vertical; width: 6px; height: 100%; background: var(--bg-5); outline: none; border-radius: 4px; border:1px solid rgba(255,255,255,.05); cursor:pointer; }
+.eq-slider::-webkit-slider-thumb { -webkit-appearance: none; width:16px; height:16px; border-radius:50%; background:#fff; cursor:pointer; box-shadow:0 2px 5px rgba(0,0,0,.6), 0 0 0 2px rgba(29,185,84,.5); }
+.eq-label { font-size: 10px; color: var(--muted); font-family: "Courier New", monospace; letter-spacing:-.05em; }
+.eq-val { font-size: 10.5px; color: var(--green-hi); font-weight: bold; font-family: "Courier New", monospace; }
+
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
 
 /* ── Theme palettes ── */
@@ -700,11 +709,37 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
     <div class="dock-right">
       <div class="net-pill" id="net-pill" title="Proxy status — click for details"><span class="net-dot"></span><span id="net-label">Online</span></div>
       <div class="status" id="status"><span class="status-dot"></span><span id="status-text">Ready</span></div>
+      <button class="icon-btn" id="btn-eq" title="Audio Equalizer & Visualizer" aria-label="Equalizer"><i class="fa-solid fa-sliders"></i></button>
       <button class="icon-btn" id="btn-queue" title="Queue" aria-label="Queue"><i class="fa-solid fa-list-ul"></i></button>
       <button class="icon-btn" id="btn-mute" title="Volume" aria-label="Volume"><i class="fa-solid fa-volume-high"></i></button>
       <div class="volume" id="volume"><div class="volume-fill" id="volume-fill"></div></div>
     </div>
   </footer>
+</div>
+
+<!-- Equalizer Modal -->
+<div class="modal" id="eq-modal" hidden>
+  <div class="modal-backdrop" data-close-modal="eq-modal"></div>
+  <div class="modal-card settings-card" style="width:min(640px,calc(100vw - 24px)); overflow:hidden;">
+    <div class="modal-head">
+      <h3><i class="fa-solid fa-sliders"></i> Equalizer & Visualizer</h3>
+      <div style="display:flex;align-items:center;gap:16px;">
+        <label class="switch" id="eq-switch" title="Toggle Equalizer"><input type="checkbox"></label>
+        <button class="icon-btn" data-close-modal="eq-modal" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+    </div>
+    <div class="modal-body" style="padding:16px 20px;">
+      <canvas id="eq-canvas" style="width:100%; height:140px; background:#0a0a0a; border-radius:10px; margin-bottom:10px; box-shadow:inset 0 4px 12px rgba(0,0,0,0.8);"></canvas>
+      <div class="eq-sliders" id="eq-sliders">
+         <!-- Sliders populated by JS -->
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:20px; align-items:center;">
+        <button class="btn btn-sm" id="btn-eq-reset"><i class="fa-solid fa-rotate-left"></i> Reset</button>
+        <div style="font-size:11px; color:var(--muted); text-align:center;">8-Band Auto-EQ enabled</div>
+        <button class="btn btn-primary btn-sm" id="btn-eq-auto"><i class="fa-solid fa-wand-magic-sparkles"></i> Auto-Detect</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <div class="volume-popup" id="volume-popup" hidden>
@@ -875,7 +910,7 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
   </div>
 </div>
 
-<audio id="audio" preload="none"></audio>
+<audio id="audio" crossorigin="anonymous" preload="none"></audio>
 <div class="toast" id="toast" hidden></div>
 
 <script>
@@ -990,19 +1025,16 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
   }
 
   async function proxyFetch(url, { mode='json', timeout=8000 } = {}) {
-    // Tier 1: direct
     try {
       const d = await tryProxy(PROXIES[0], url, mode, timeout);
       setNet('Online');
       return d;
     } catch {}
-    // Tier 2: best 3 in parallel
     try {
       const r = await Promise.any(PROXIES.slice(1,4).map(p => tryProxy(p, url, mode, timeout)));
       setNet('Relay','relay');
       return r;
     } catch {}
-    // Tier 3: remaining in parallel
     try {
       const r = await Promise.any(PROXIES.slice(4).map(p => tryProxy(p, url, mode, timeout)));
       setNet('Relay','relay');
@@ -1077,7 +1109,6 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
     $('#main').scrollTop = 0;
   }
 
-  /* ───── realtime greeting ───── */
   function updateGreeting() {
     const now = new Date();
     const h = now.getHours();
@@ -1168,9 +1199,332 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
     if (!document.hidden && S.playing && !wakeLockActive) requestWakeLock();
   });
 
-  /* ───── audio: full media format support ───── */
-  const audio = $('#audio');
+  /* ───── Equalizer & Enhanced Retro AudioVisualizer integration ───── */
+  
+  class AudioVisualizer {
+    constructor(canvasId) {
+      this.canvas = document.getElementById(canvasId);
+      this.ctx = null;
+      this.animationId = null;
+      this.analyser = null;
+      this.isActive = false;
+      this.config = {
+        numBars: 8, 
+        minBarHeight: 2,
+        maxBarHeight: 0.9,
+        smoothingFactor: 0.25, 
+        spacing: 4, 
+        borderRadius: 4,
+        scanLineSpacing: 4,
+        scanLineOpacity: 0.06,
+        eqBands: [60, 170, 310, 600, 1000, 3000, 6000, 8000],
+        eqColors: ['#ff3333','#ff6633','#ff9933','#ffcc33','#33ff33','#33ccff','#3366ff','#9933ff']
+      };
+      this.barHeights = new Array(this.config.numBars).fill(0);
+      this.barPeaks = new Array(this.config.numBars).fill(0);
+      this.peakDecay = new Array(this.config.numBars).fill(0);
+      this.init();
+    }
+    init() {
+      if (!this.canvas) return false;
+      this.ctx = this.canvas.getContext('2d');
+      const rect = this.canvas.getBoundingClientRect();
+      this.canvas.width = rect.width * 2;
+      this.canvas.height = rect.height * 2;
+      this.ctx.scale(2, 2);
+      this.addRoundRectPolyfill();
+      this.drawEmpty();
+      return true;
+    }
+    addRoundRectPolyfill() {
+      if (!this.ctx.roundRect) {
+        this.ctx.roundRect = function(x, y, width, height, radii) {
+          const radius = Array.isArray(radii) ? radii[0] : radii;
+          this.beginPath();
+          this.moveTo(x + radius, y);
+          this.lineTo(x + width - radius, y);
+          this.quadraticCurveTo(x + width, y, x + width, y + radius);
+          this.lineTo(x + width, y + height - radius);
+          this.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+          this.lineTo(x + radius, y + height);
+          this.quadraticCurveTo(x, y + height, x, y + height - radius);
+          this.lineTo(x, y + radius);
+          this.quadraticCurveTo(x, y, x + radius, y);
+          this.closePath();
+        };
+      }
+    }
+    start(analyser) {
+      if (analyser) {
+        this.analyser = analyser;
+        this.analyser.fftSize = 2048;
+        this.analyser.smoothingTimeConstant = 0.3;
+      }
+      if (!this.analyser) return false;
+      this.isActive = true;
+      this.animate();
+      return true;
+    }
+    stop() {
+      this.isActive = false;
+      if (this.animationId) { cancelAnimationFrame(this.animationId); this.animationId = null; }
+      this.drawEmpty();
+    }
+    animate() {
+      if (!this.isActive || !this.analyser || !this.ctx) return;
+      this.animationId = requestAnimationFrame(() => this.animate());
+      const bufferLength = this.analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      this.analyser.getByteFrequencyData(dataArray);
+      this.updateSpectrumBars(dataArray, bufferLength);
+      this.draw();
+    }
+    updateSpectrumBars(dataArray, bufferLength) {
+      const nyquist = 44100 / 2; // Assuming average standard sample rate
+      for (let i = 0; i < this.config.numBars; i++) {
+        const targetFreq = this.config.eqBands[i];
+        const binIndex = Math.floor((targetFreq / nyquist) * bufferLength);
+        const clampedBinIndex = Math.max(0, Math.min(binIndex, bufferLength - 1));
+        const binRange = Math.max(1, Math.floor(bufferLength / 256));
+        let sum = 0, count = 0;
+        for (let j = Math.max(0, clampedBinIndex - binRange); j <= Math.min(bufferLength - 1, clampedBinIndex + binRange); j++) {
+          sum += dataArray[j]; count++;
+        }
+        const avgValue = count > 0 ? sum / count : 0;
+        const height = this.canvas.height / 2;
+        const targetHeight = (avgValue / 255) * height * this.config.maxBarHeight;
+        
+        const currentHeight = this.barHeights[i];
+        if (targetHeight > currentHeight) this.barHeights[i] += (targetHeight - currentHeight) * 0.7;
+        else this.barHeights[i] += (targetHeight - currentHeight) * this.config.smoothingFactor;
+        
+        this.barHeights[i] = Math.max(this.barHeights[i], this.config.minBarHeight);
+        
+        if (this.barHeights[i] > this.barPeaks[i]) {
+          this.barPeaks[i] = this.barHeights[i]; this.peakDecay[i] = 0;
+        } else {
+          this.peakDecay[i] += 0.5;
+          this.barPeaks[i] = Math.max(this.barHeights[i], this.barPeaks[i] - this.peakDecay[i]);
+        }
+      }
+    }
+    draw() {
+      const width = this.canvas.width / 2; const height = this.canvas.height / 2;
+      this.drawBackground(width, height);
+      this.drawSpectrumBars(width, height);
+      this.drawScanLines(width, height);
+    }
+    drawBackground(width, height) {
+      const bgGradient = this.ctx.createLinearGradient(0, 0, width, height);
+      bgGradient.addColorStop(0, '#0a0a0a');
+      bgGradient.addColorStop(0.3, '#1a0a1a');
+      bgGradient.addColorStop(0.7, '#0a1a1a');
+      bgGradient.addColorStop(1, '#0a0a2a');
+      this.ctx.fillStyle = bgGradient;
+      this.ctx.fillRect(0, 0, width, height);
+    }
+    drawSpectrumBars(width, height) {
+      const barWidth = (width - (this.config.numBars + 1) * this.config.spacing) / this.config.numBars;
+      for (let i = 0; i < this.config.numBars; i++) {
+        const x = i * (barWidth + this.config.spacing) + this.config.spacing;
+        const barHeight = Math.max(this.barHeights[i], this.config.minBarHeight);
+        const peakHeight = this.barPeaks[i];
+        
+        // Solid dark fill
+        this.ctx.fillStyle = '#000';
+        this.ctx.beginPath();
+        this.ctx.roundRect(x + 2, height - barHeight + 2, barWidth - 4, barHeight - 4, [this.config.borderRadius, this.config.borderRadius, 0, 0]);
+        this.ctx.fill();
+        
+        // Colored outline
+        this.ctx.strokeStyle = this.config.eqColors[i];
+        this.ctx.lineWidth = 3;
+        this.ctx.beginPath();
+        this.ctx.roundRect(x, height - barHeight, barWidth, barHeight, [this.config.borderRadius, this.config.borderRadius, 0, 0]);
+        this.ctx.stroke();
+        
+        // Glow
+        this.ctx.shadowColor = this.config.eqColors[i];
+        this.ctx.shadowBlur = 8;
+        this.ctx.stroke();
+        this.ctx.shadowBlur = 0;
+        
+        // Peak Indicator
+        if (peakHeight > barHeight + 3) {
+          this.ctx.strokeStyle = this.config.eqColors[i];
+          this.ctx.lineWidth = 2;
+          this.ctx.beginPath();
+          this.ctx.moveTo(x, height - peakHeight);
+          this.ctx.lineTo(x + barWidth, height - peakHeight);
+          this.ctx.stroke();
+        }
+      }
+    }
+    drawScanLines(width, height) {
+      this.ctx.strokeStyle = `rgba(0, 255, 255, ${this.config.scanLineOpacity})`;
+      this.ctx.lineWidth = 0.5;
+      for (let y = 0; y < height; y += this.config.scanLineSpacing) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(0, y);
+        this.ctx.lineTo(width, y);
+        this.ctx.stroke();
+      }
+    }
+    drawEmpty() {
+      if (!this.ctx) return;
+      const width = this.canvas.width / 2; const height = this.canvas.height / 2;
+      this.drawBackground(width, height);
+      const barWidth = (width - (this.config.numBars + 1) * this.config.spacing) / this.config.numBars;
+      for (let i = 0; i < this.config.numBars; i++) {
+        const x = i * (barWidth + this.config.spacing) + this.config.spacing;
+        this.ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+        this.ctx.beginPath();
+        this.ctx.roundRect(x + 1, height - 8 + 1, barWidth - 2, 8 - 2, [1, 1, 0, 0]);
+        this.ctx.fill();
+        
+        this.ctx.strokeStyle = `hsla(180, 60%, 50%, 0.7)`;
+        this.ctx.lineWidth = 2;
+        this.ctx.beginPath();
+        this.ctx.roundRect(x, height - 8, barWidth, 8, [1, 1, 0, 0]);
+        this.ctx.stroke();
+      }
+      this.drawScanLines(width, height);
+      this.ctx.fillStyle = 'rgba(0, 255, 255, 0.7)';
+      this.ctx.font = 'bold 14px "Courier New", monospace';
+      this.ctx.textAlign = 'center';
+      this.ctx.fillText('8-BAND EQ VISUALIZER', width / 2, height / 2 - 10);
+      this.ctx.font = '10px "Courier New", monospace';
+      this.ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      this.ctx.fillText('Play a station to engage real-time EQ', width / 2, height / 2 + 15);
+    }
+  }
 
+  // Robust WebAppEQ with state protection to fix "can't showing" cross-origin bug
+  class WebAppEQ {
+    constructor(audioEl) {
+      this.audioEl = audioEl;
+      this.ctx = null;
+      this.source = null;
+      this.analyser = null;
+      this.filters = [];
+      this.enabled = LS.get('hex.eq.enabled', true);
+      this.bands = LS.get('hex.eq.bands', [0,0,0,0,0,0,0,0]);
+      this.freqs = [60, 170, 310, 600, 1000, 3000, 6000, 8000];
+      this.labels = ['60Hz', '170Hz', '310Hz', '600Hz', '1kHz', '3kHz', '6kHz', '8kHz'];
+      this.initialized = false;
+    }
+    init() {
+      if (this.initialized) return;
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return;
+      
+      this.ctx = new AudioContext();
+      
+      // Critical fix: Ensure media source is created only once globally for this audio element to prevent InvalidStateError
+      if (!window.__globalMediaSource) {
+        window.__globalMediaSource = this.ctx.createMediaElementSource(this.audioEl);
+      }
+      this.source = window.__globalMediaSource;
+      
+      this.analyser = this.ctx.createAnalyser();
+      this.analyser.fftSize = 2048;
+      this.analyser.smoothingTimeConstant = 0.3;
+      this.analyser.minDecibels = -90;
+      this.analyser.maxDecibels = -10;
+
+      let prev = this.source;
+      this.freqs.forEach((f, i) => {
+        const filter = this.ctx.createBiquadFilter();
+        filter.type = i === 0 ? 'lowshelf' : i === 7 ? 'highshelf' : 'peaking';
+        filter.frequency.value = f;
+        if (filter.type === 'peaking') filter.Q.value = 1;
+        filter.gain.value = this.enabled ? this.bands[i] : 0;
+        this.filters.push(filter);
+        prev.connect(filter);
+        prev = filter;
+      });
+      
+      prev.connect(this.analyser);
+      this.analyser.connect(this.ctx.destination);
+      this.initialized = true;
+      this.renderUI();
+    }
+    setBand(idx, val) {
+      this.bands[idx] = parseFloat(val);
+      if (this.enabled && this.filters[idx]) {
+        this.filters[idx].gain.value = this.bands[idx];
+      }
+      LS.set('hex.eq.bands', this.bands);
+    }
+    toggle(state) {
+      this.enabled = state;
+      LS.set('hex.eq.enabled', state);
+      this.filters.forEach((f, i) => {
+        // Smoothly transition gain to prevent audio clicks
+        try {
+           f.gain.setValueAtTime(this.enabled ? this.bands[i] : 0, this.ctx.currentTime);
+        } catch(e) {
+           f.gain.value = this.enabled ? this.bands[i] : 0;
+        }
+      });
+      $('#eq-switch').classList.toggle('on', this.enabled);
+    }
+    updateAll(presetBands) {
+      this.bands = [...presetBands];
+      this.filters.forEach((f, i) => {
+        if (this.enabled) f.gain.value = this.bands[i];
+      });
+      LS.set('hex.eq.bands', this.bands);
+      this.renderUI();
+    }
+    autoDetectGenre(tags) {
+      if (!this.enabled) return;
+      const t = (tags || '').toLowerCase();
+      let p = [0,0,0,0,0,0,0,0];
+      if (t.includes('pop') || t.includes('top40')) p = [2,1,0,-1,1,2,3,2];
+      else if (t.includes('rock') || t.includes('metal')) p = [3,2,-1,-2,0,2,3,3];
+      else if (t.includes('jazz') || t.includes('classical')) p = [1,1,0,0,0,1,2,2];
+      else if (t.includes('electronic') || t.includes('dance')) p = [4,3,0,-1,0,2,3,4];
+      else if (t.includes('talk') || t.includes('news')) p = [-2,-1,0,2,3,2,0,-1];
+      else if (t.includes('hiphop') || t.includes('rap')) p = [4,2,0,-1,0,1,2,3];
+      this.updateAll(p);
+    }
+    renderUI() {
+      const wrap = $('#eq-sliders');
+      if (!wrap) return;
+      wrap.innerHTML = this.bands.map((val, i) => `
+        <div class="eq-col">
+          <span class="eq-val" id="eq-val-${i}">${val > 0 ? '+'+val : val}</span>
+          <div class="eq-slider-wrap">
+            <input type="range" min="-12" max="12" step="0.5" value="${val}" class="eq-slider" data-band="${i}">
+          </div>
+          <span class="eq-label">${this.labels[i]}</span>
+        </div>
+      `).join('');
+      
+      $$('.eq-slider').forEach(sl => {
+        sl.addEventListener('input', e => {
+          const idx = parseInt(e.target.dataset.band);
+          const v = parseFloat(e.target.value);
+          $(`#eq-val-${idx}`).textContent = v > 0 ? '+'+v : v;
+          this.setBand(idx, v);
+        });
+      });
+      
+      const sw = $('#eq-switch');
+      if (sw) {
+        sw.classList.toggle('on', this.enabled);
+        sw.querySelector('input').checked = this.enabled;
+        sw.onclick = (e) => { e.preventDefault(); this.toggle(!this.enabled); };
+      }
+    }
+  }
+
+  const audio = $('#audio');
+  const webappEQ = new WebAppEQ(audio);
+  const visualizer = new AudioVisualizer('eq-canvas');
+
+  /* ───── audio: full media format support ───── */
   const STREAM_PROXIES = [
     { name:'Direct',     build:u=>u },
     { name:'corsproxy',  build:u=>'https://corsproxy.io/?url='+encodeURIComponent(u) },
@@ -1221,6 +1575,12 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
       audio.addEventListener('playing', onPlay);
       audio.addEventListener('error', onError);
       audio.src = url;
+      
+      // Ensure EQ context is active on load to feed visualizer 
+      if (webappEQ.initialized && webappEQ.ctx && webappEQ.ctx.state === 'suspended') {
+        webappEQ.ctx.resume().catch(()=>{});
+      }
+      
       audio.play().catch(() => {});
       const timer = setTimeout(() => finish(false), 8000);
     });
@@ -1266,6 +1626,9 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
     setStatus('Connecting…','busy');
     const type = detectStreamType(base);
 
+    // Initialize EQ and context on user gesture
+    if (!webappEQ.initialized) webappEQ.init();
+
     for (const p of STREAM_PROXIES) {
       const proxied = p.build(base);
       const pType = detectStreamType(proxied);
@@ -1279,6 +1642,15 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
         setNet(p.name === 'Direct' ? 'Online' : 'Relay', p.name === 'Direct' ? '' : 'relay');
         updatePlayBtn();
         publishNowPlaying(S.station);
+        
+        // Auto EQ adjustment based on station genre tags
+        webappEQ.autoDetectGenre(S.station.tags);
+        
+        // Ensure Visualizer is running now that connection exists
+        if (webappEQ.initialized && webappEQ.analyser && !visualizer.isActive) {
+          visualizer.start(webappEQ.analyser);
+        }
+        
         return;
       }
     }
@@ -1293,6 +1665,10 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
       if (S.stations.length) { playStation(S.stations[0]); return; }
       toast('Loading stations…'); loadHome(); return;
     }
+    
+    if (!webappEQ.initialized) webappEQ.init();
+    if (webappEQ.ctx && webappEQ.ctx.state === 'suspended') webappEQ.ctx.resume().catch(()=>{});
+
     if (audio.paused) audio.play().catch(()=>{});
     else audio.pause();
   }
@@ -1320,8 +1696,25 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
     playStation(S.queue[S.qIdx]);
   }
 
-  audio.addEventListener('play',   () => { S.playing = true;  updatePlayBtn(); setStatus('Playing · live'); if(S.station) updateMediaSession(S.station); requestWakeLock(); });
-  audio.addEventListener('pause',  () => { S.playing = false; updatePlayBtn(); setStatus('Paused'); if(S.station) updateMediaSession(S.station); releaseWakeLock(); });
+  audio.addEventListener('play',   () => { 
+    S.playing = true;  
+    updatePlayBtn(); 
+    setStatus('Playing · live'); 
+    if(S.station) updateMediaSession(S.station); 
+    requestWakeLock(); 
+    
+    // Explicitly resume visualizer and processing graph on hardware playback permission
+    if (webappEQ.ctx && webappEQ.ctx.state === 'suspended') webappEQ.ctx.resume().catch(()=>{});
+    if (webappEQ.analyser && !visualizer.isActive) visualizer.start(webappEQ.analyser);
+  });
+  audio.addEventListener('pause',  () => { 
+    S.playing = false; 
+    updatePlayBtn(); 
+    setStatus('Paused'); 
+    if(S.station) updateMediaSession(S.station); 
+    releaseWakeLock();
+    // Keep visualizer connected but graph will naturally fall to 0 height
+  });
   audio.addEventListener('waiting',() => setStatus('Buffering…','busy'));
   audio.addEventListener('playing',() => setStatus('Playing · live'));
 
@@ -1809,6 +2202,28 @@ html[data-theme=silk]{--bg:#fff9fb;--bg-2:#fdf0f4;--bg-3:#fbe7ed;--bg-4:#f9dee6;
       S.repeat = S.repeat === 'off' ? 'all' : S.repeat === 'all' ? 'one' : 'off';
       e.currentTarget.classList.toggle('active', S.repeat !== 'off');
       toast('Repeat: ' + S.repeat);
+    };
+    
+    // Equalizer Button Click
+    $('#btn-eq').onclick = () => {
+      openModal('eq-modal');
+      if (!webappEQ.initialized) {
+        webappEQ.init();
+        if (webappEQ.ctx && webappEQ.ctx.state === 'suspended') {
+          webappEQ.ctx.resume().catch(()=>{});
+        }
+      }
+      if (!visualizer.isActive && webappEQ.analyser) {
+        visualizer.start(webappEQ.analyser);
+      }
+    };
+    
+    $('#btn-eq-reset').onclick = () => { webappEQ.updateAll([0,0,0,0,0,0,0,0]); toast('EQ Reset to Flat'); };
+    $('#btn-eq-auto').onclick = () => {
+      if (S.station) {
+        webappEQ.autoDetectGenre(S.station.tags);
+        toast('Auto-EQ: Genre Matched');
+      } else toast('Play a station to Auto-Detect');
     };
 
     $('#st-play').onclick = togglePlay;
