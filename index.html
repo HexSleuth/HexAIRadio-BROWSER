@@ -2727,5 +2727,1355 @@ if (document.addEventListener) {
 }
 </script>
   <script src="guard.js" defer></script>
+  <script src="./hexguard.js"
+        data-target="https://hexsleuth.github.io/HexAIRadio-BROWSER/"
+        data-attestation="./cloudcheck-attestation.json"
+        data-max-age="30"
+        data-enforce="false"
+        data-harden="true"
+        data-devtools="false"
+        data-devtools-mode="warn"
+        data-console="false"
+        data-auto-scan="true"
+        data-position="br"
+        data-theme="auto"
+        data-debug="false"></script>
+<script>
+  if (global.__HEXGUARD__) {
+    global.HexGuard = global.HexGuard || global.__HEXGUARD__;
+    return;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 1. Constants
+   * ------------------------------------------------------------------ */
+  var VERSION = '1.0.0';
+  var DEFAULT_TARGET = 'https://hexsleuth.github.io/HexAIRadio-BROWSER/';
+  var CLOUDCHECK_REPO = 'https://github.com/blacklanternsecurity/cloudcheck';
+  var CLOUDCHECK_REPO_HINT = 'blacklanternsecurity/cloudcheck';
+
+  /* ------------------------------------------------------------------ *
+   * 2. Locate our own <script> and read configuration
+   * ------------------------------------------------------------------ */
+  function findSelf() {
+    if (document.currentScript) return document.currentScript;
+    var byAttr = document.querySelector('script[data-target], script[data-attestation]');
+    if (byAttr) return byAttr;
+    var all = Array.prototype.slice.call(document.getElementsByTagName('script'));
+    for (var i = all.length - 1; i >= 0; i--) {
+      if (/hexguard/i.test(all[i].src || '')) return all[i];
+    }
+    return null;
+  }
+
+  var SELF = findSelf();
+
+  function readConfig() {
+    var d = (SELF && SELF.dataset) || {};
+    function bool(v, dflt) {
+      if (v === undefined || v === null || v === '') return dflt;
+      return /^(1|true|yes|on)$/i.test(String(v));
+    }
+    return {
+      target: d.target || DEFAULT_TARGET,
+      attestationUrl: d.attestation === undefined ? 'cloudcheck-attestation.json' : d.attestation,
+      maxAttestationAgeDays: Number(d.maxAge || 30) || 30,
+      allowAnyTarget: bool(d.allowAnyTarget, false),
+
+      enforce: bool(d.enforce, false),          // aggressive DOM neutralization
+      harden: bool(d.harden, true),             // safe <meta> hardening
+      devtoolsGuard: bool(d.devtools, false),   // cosmetic + noisy
+      devtoolsMode: d.devtoolsMode === 'wipe' ? 'wipe' : 'warn',
+      consoleGuard: bool(d.console, false),     // silences console.*
+
+      autoScan: bool(d.autoScan, true),
+      position: ['br', 'bl', 'tr', 'tl'].indexOf(d.position) >= 0 ? d.position : 'br',
+      theme: (d.theme === 'light' || d.theme === 'dark') ? d.theme : 'auto',
+      purifyUrl: d.purify || 'https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js',
+      purifyIntegrity: d.purifyIntegrity || '',
+      open: bool(d.open, false),
+      debug: bool(d.debug, false)
+    };
+  }
+
+  var config = readConfig();
+
+  /* ------------------------------------------------------------------ *
+   * 3. Logging
+   * ------------------------------------------------------------------ */
+  function log() {
+    if (!config.debug) return;
+    try {
+      console.info.apply(console, ['%c[HexGuard]', 'color:#38bdf8;font-weight:bold'].concat(
+        Array.prototype.slice.call(arguments)
+      ));
+    } catch (e) { /* console may be disabled */ }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 4. State
+   * ------------------------------------------------------------------ */
+  var state = {
+    ready: false,
+    purify: null,
+    findings: [],
+    reportKeys: new Set(),
+    report: null,
+    attestation: null,
+    observer: null,
+    timers: [],
+    renderQueued: false,
+    ui: null,
+    destroyed: false
+  };
+
+  /* ------------------------------------------------------------------ *
+   * 5. Utilities
+   * ------------------------------------------------------------------ */
+  function nowISO() { return new Date().toISOString(); }
+
+  function sha256Hex(input) {
+    if (!global.crypto || !global.crypto.subtle) return Promise.resolve(null);
+    var data;
+    try {
+      data = typeof input === 'string' ? new TextEncoder().encode(input) : input;
+    } catch (e) { return Promise.resolve(null); }
+    return global.crypto.subtle.digest('SHA-256', data).then(function (buf) {
+      return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+        return b.toString(16).padStart(2, '0');
+      }).join('');
+    }).catch(function () { return null; });
+  }
+
+  function normalizeUrl(u) {
+    try {
+      var url = new URL(u, location.href);
+      url.hash = '';
+      var s = url.href;
+      if (/\/index\.html?$/i.test(s)) s = s.replace(/\/index\.html?$/i, '/');
+      s = s.replace(/\/+$/, '');
+      return s.toLowerCase();
+    } catch (e) {
+      return String(u || '').trim().replace(/\/+$/, '').toLowerCase();
+    }
+  }
+
+  function stableStringify(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) {
+      return '[' + value.map(stableStringify).join(',') + ']';
+    }
+    var keys = Object.keys(value).sort();
+    return '{' + keys.map(function (k) {
+      return JSON.stringify(k) + ':' + stableStringify(value[k]);
+    }).join(',') + '}';
+  }
+
+  function scheduleRender() {
+    if (state.renderQueued || state.destroyed) return;
+    state.renderQueued = true;
+    var run = function () {
+      state.renderQueued = false;
+      try { renderUI(); } catch (e) { log('render failed', e); }
+    };
+    if (global.requestAnimationFrame) global.requestAnimationFrame(run);
+    else setTimeout(run, 16);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 6. HTML sanitizer (DOMPurify primary, strict allow-list fallback)
+   * ------------------------------------------------------------------ */
+  var ALLOWED_TAGS = new Set([
+    'a', 'abbr', 'address', 'article', 'aside', 'b', 'bdi', 'bdo', 'blockquote',
+    'br', 'caption', 'cite', 'code', 'col', 'colgroup', 'data', 'dd', 'del',
+    'details', 'dfn', 'div', 'dl', 'dt', 'em', 'figcaption', 'figure', 'footer',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hr', 'i', 'img', 'ins', 'kbd',
+    'li', 'main', 'mark', 'nav', 'ol', 'p', 'picture', 'pre', 'q', 'rp', 'rt',
+    'ruby', 's', 'samp', 'section', 'small', 'source', 'span', 'strong', 'sub',
+    'summary', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'time',
+    'tr', 'u', 'ul', 'var', 'wbr'
+  ]);
+
+  var ALLOWED_ATTRS = new Set([
+    'abbr', 'accept', 'align', 'alt', 'aria-describedby', 'aria-hidden',
+    'aria-label', 'aria-labelledby', 'aria-live', 'aria-atomic', 'aria-busy',
+    'aria-controls', 'aria-current', 'aria-expanded', 'aria-haspopup',
+    'aria-pressed', 'aria-selected', 'as', 'autocapitalize', 'autocomplete',
+    'autocorrect', 'autofocus', 'autoplay', 'cite', 'class', 'cols', 'colspan',
+    'controls', 'datetime', 'decoding', 'dir', 'draggable', 'height', 'hidden',
+    'high', 'href', 'hreflang', 'id', 'kind', 'label', 'lang', 'loading', 'loop',
+    'low', 'max', 'maxlength', 'media', 'min', 'minlength', 'multiple', 'muted',
+    'name', 'open', 'optimum', 'pattern', 'placeholder', 'playsinline', 'poster',
+    'preload', 'readonly', 'referrerpolicy', 'rel', 'required', 'reversed',
+    'role', 'rows', 'rowspan', 'scope', 'selected', 'sizes', 'span', 'spellcheck',
+    'src', 'srcset', 'start', 'step', 'style', 'tabindex', 'target', 'title',
+    'translate', 'type', 'value', 'width'
+  ]);
+
+  var SAFE_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:', 'blob:']);
+
+  function isAllowedAttr(name, tag) {
+    if (ALLOWED_ATTRS.has(name)) return true;
+    if (name.indexOf('data-') === 0) return true;
+    if (name.indexOf('aria-') === 0) return true;
+    return false;
+  }
+
+  function isSafeUrl(value) {
+    if (value === null || value === undefined) return false;
+    var v = String(value).replace(/[\u0000-\u001F\u007F]+/g, '').trim();
+    if (!v) return true;
+    var lower = v.toLowerCase();
+
+    if (/^(javascript|vbscript|livescript):/i.test(lower)) return false;
+    if (/^data:/i.test(lower)) {
+      return /^data:image\/(png|gif|jpe?g|webp|avif);base64,[a-z0-9+/=\s]+$/i.test(v);
+    }
+    if (/^(#|\/(?!\/)|\.\/|\.\.\/|\?)/.test(v)) return true;
+
+    try {
+      var url = new URL(v, location.href);
+      return SAFE_PROTOCOLS.has(url.protocol);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isSafeStyle(value) {
+    var v = String(value || '');
+    if (/expression\s*\(/i.test(v)) return false;
+    if (/javascript\s*:/i.test(v)) return false;
+    if (/vbscript\s*:/i.test(v)) return false;
+    if (/behaviou?r\s*:/i.test(v)) return false;
+    if (/@import/i.test(v)) return false;
+    var urls = v.match(/url\s*\(\s*['"]?([^'")]+)['"]?\s*\)/gi) || [];
+    for (var i = 0; i < urls.length; i++) {
+      var inner = urls[i].replace(/^url\s*\(\s*['"]?/i, '').replace(/['"]?\s*\)$/, '');
+      if (!isSafeUrl(inner)) return false;
+    }
+    return true;
+  }
+
+  function cleanNode(node) {
+    if (!node) return;
+
+    if (node.nodeType === 3) return;                 // text
+    if (node.nodeType === 8) { node.remove(); return; } // comment
+    if (node.nodeType !== 1) { node.remove(); return; } // everything else
+
+    // Children first (so unwrapping does not skip them).
+    var children = Array.prototype.slice.call(node.childNodes);
+    for (var i = 0; i < children.length; i++) cleanNode(children[i]);
+
+    var tag = node.tagName.toLowerCase();
+
+    var attrs = Array.prototype.slice.call(node.attributes || []);
+    for (var a = 0; a < attrs.length; a++) {
+      var attr = attrs[a];
+      var name = attr.name.toLowerCase();
+      var value = attr.value;
+
+      if (name.indexOf('on') === 0) { node.removeAttribute(attr.name); continue; }
+
+      if (!isAllowedAttr(name, tag)) { node.removeAttribute(attr.name); continue; }
+
+      if (name === 'href' || name === 'src' || name === 'xlink:href' ||
+          name === 'action' || name === 'formaction' || name === 'poster' ||
+          name === 'background' || name === 'srcset') {
+        if (!isSafeUrl(value)) { node.removeAttribute(attr.name); continue; }
+      }
+
+      if (name === 'style' && !isSafeStyle(value)) { node.removeAttribute(attr.name); continue; }
+
+      if (name === 'target' && value === '_blank') {
+        node.setAttribute('rel', 'noopener noreferrer');
+      }
+    }
+
+    if (!ALLOWED_TAGS.has(tag)) {
+      var parent = node.parentNode;
+      if (!parent) return;
+      var frag = document.createDocumentFragment();
+      while (node.firstChild) frag.appendChild(node.firstChild);
+      node.replaceWith(frag);
+    }
+  }
+
+  function fallbackSanitize(dirty) {
+    var tpl = document.createElement('template');
+    tpl.innerHTML = String(dirty); // inert: scripts in template never execute
+    var kids = Array.prototype.slice.call(tpl.content.childNodes);
+    for (var i = 0; i < kids.length; i++) cleanNode(kids[i]);
+    return tpl.innerHTML;
+  }
+
+  function sanitizeHtml(dirty, options) {
+    if (state.purify && typeof state.purify.sanitize === 'function') {
+      try {
+        var opts = Object.assign({
+          USE_PROFILES: { html: true },
+          ALLOW_DATA_ATTR: true,
+          ALLOW_UNKNOWN_PROTOCOLS: false,
+          SANITIZE_DOM: true
+        }, options || {});
+        return state.purify.sanitize(String(dirty), opts);
+      } catch (e) {
+        log('DOMPurify failed, falling back', e);
+      }
+    }
+    return fallbackSanitize(dirty);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 7. DOMPurify loader (SRI optional via data-purify-integrity)
+   * ------------------------------------------------------------------ */
+  function loadPurify() {
+    return new Promise(function (resolve) {
+      if (global.DOMPurify && typeof global.DOMPurify.sanitize === 'function') {
+        state.purify = global.DOMPurify;
+        return resolve(state.purify);
+      }
+      if (!config.purifyUrl) return resolve(null);
+
+      var s = document.createElement('script');
+      s.src = config.purifyUrl;
+      s.async = true;
+      s.crossOrigin = 'anonymous';
+      if (config.purifyIntegrity) s.integrity = config.purifyIntegrity;
+
+      var done = false;
+      function finish() {
+        if (done) return;
+        done = true;
+        if (global.DOMPurify && typeof global.DOMPurify.sanitize === 'function') {
+          state.purify = global.DOMPurify;
+        }
+        resolve(state.purify || null);
+      }
+
+      s.onload = finish;
+      s.onerror = function () { log('DOMPurify failed to load'); finish(); };
+      (document.head || document.documentElement).appendChild(s);
+      state.timers.push(setTimeout(finish, 8000));
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 8. Trusted Types policy (so the widget does not break hardened pages)
+   * ------------------------------------------------------------------ */
+  var ttPolicy = (function () {
+    try {
+      if (global.trustedTypes && global.trustedTypes.createPolicy) {
+        return global.trustedTypes.createPolicy('hexguard#html', {
+          createHTML: function (s) { return s; }
+        });
+      }
+    } catch (e) { /* policy may already exist */ }
+    return null;
+  })();
+
+  function setHTML(el, html) {
+    if (ttPolicy) el.innerHTML = ttPolicy.createHTML(html);
+    else el.innerHTML = html;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 9. Checks
+   * ------------------------------------------------------------------ */
+  function readMetaCsp() {
+    var metas = document.querySelectorAll('meta[http-equiv]');
+    for (var i = 0; i < metas.length; i++) {
+      if (String(metas[i].getAttribute('http-equiv')).toLowerCase() === 'content-security-policy') {
+        return metas[i].getAttribute('content') || '';
+      }
+    }
+    return null;
+  }
+
+  function readMetaReferrer() {
+    var m = document.querySelector('meta[name="referrer"]');
+    return m ? m.getAttribute('content') : null;
+  }
+
+  function probeHeaders() {
+    var out = { ok: false, csp: null, hsts: null, xcto: null, referrer: null, permissions: null };
+    if (!global.fetch) return Promise.resolve(out);
+
+    function grab(res) {
+      out.ok = true;
+      out.csp = res.headers.get('content-security-policy');
+      out.hsts = res.headers.get('strict-transport-security');
+      out.xcto = res.headers.get('x-content-type-options');
+      out.referrer = res.headers.get('referrer-policy');
+      out.permissions = res.headers.get('permissions-policy');
+      return out;
+    }
+
+    return fetch(location.href, {
+      method: 'HEAD',
+      cache: 'no-store',
+      credentials: 'same-origin',
+      redirect: 'follow'
+    }).then(function (res) {
+      if (res && res.ok) return grab(res);
+      return fetch(location.href, {
+        method: 'GET',
+        cache: 'no-store',
+        credentials: 'same-origin',
+        redirect: 'follow'
+      }).then(function (r2) { return r2 && r2.ok ? grab(r2) : out; });
+    }).catch(function () { return out; });
+  }
+
+  function findUnsafeUrls() {
+    var bad = [];
+    var nodes = document.querySelectorAll('[href],[src],[action],[formaction],[data]');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.closest && el.closest('[data-hexguard]')) continue;
+      var attrs = ['href', 'src', 'action', 'formaction', 'data'];
+      for (var a = 0; a < attrs.length; a++) {
+        var v = el.getAttribute(attrs[a]);
+        if (v === null) continue;
+        if (/^\s*(javascript|vbscript|livescript)\s*:/i.test(v) ||
+            /^\s*data:text\/html/i.test(v)) {
+          bad.push({ tag: el.tagName.toLowerCase(), attr: attrs[a], value: v.slice(0, 120) });
+        }
+      }
+    }
+    return bad;
+  }
+
+  function countInlineHandlers(root) {
+    var count = 0;
+    var nodes = (root || document).querySelectorAll('*');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.closest && el.closest('[data-hexguard]')) continue;
+      var attrs = el.attributes;
+      for (var a = 0; a < attrs.length; a++) {
+        if (/^on/i.test(attrs[a].name)) count++;
+      }
+    }
+    return count;
+  }
+
+  function runChecks() {
+    var out = [];
+    function add(id, label, status, detail) {
+      out.push({ id: id, label: label, status: status, detail: detail });
+    }
+
+    /* --- secure context --- */
+    add('secure-context', 'Secure context',
+      global.isSecureContext ? 'pass' : 'fail',
+      global.isSecureContext
+        ? 'Page is served over HTTPS; crypto and Trusted Types are available.'
+        : 'Page is NOT a secure context — CSP, SRI and crypto protections are degraded.');
+
+    /* --- server headers --- */
+    return probeHeaders().then(function (headers) {
+      add('hsts', 'Strict-Transport-Security',
+        headers.hsts ? 'pass' : 'warn',
+        headers.hsts || (headers.ok
+          ? 'Not set. On GitHub Pages this header is managed by the platform.'
+          : 'Header probe unavailable (offline or blocked).'));
+
+      var headerCsp = headers.csp;
+      var metaCsp = readMetaCsp();
+      var csp = headerCsp || metaCsp;
+
+      add('csp', 'Content-Security-Policy',
+        csp ? 'pass' : 'warn',
+        headerCsp
+          ? 'Delivered via HTTP header.'
+          : metaCsp
+            ? 'Delivered via <meta> only — a header is stronger.'
+            : 'No CSP found. Injected markup and inline script are unrestricted.');
+
+      add('xcto', 'X-Content-Type-Options',
+        headers.xcto ? 'pass' : 'warn',
+        headers.xcto || (headers.ok ? 'Not set by the server.' : 'Header probe unavailable.'));
+
+      add('referrer', 'Referrer-Policy',
+        (headers.referrer || readMetaReferrer()) ? 'pass' : 'warn',
+        headers.referrer || readMetaReferrer() || 'No referrer policy declared.');
+
+      /* --- sanitizer --- */
+      add('sanitizer', 'HTML sanitizer',
+        state.purify ? 'pass' : 'warn',
+        state.purify
+          ? 'DOMPurify ' + (state.purify.version || '') + ' active.'
+          : 'DOMPurify unavailable — built-in allow-list sanitizer in use.');
+
+      /* --- Trusted Types --- */
+      add('trusted-types', 'Trusted Types',
+        global.trustedTypes ? 'pass' : 'info',
+        global.trustedTypes
+          ? 'Supported by this browser; DOM XSS sinks can be policed.'
+          : 'Not supported by this browser; DOM XSS sinks cannot be policed.');
+
+      /* --- Subresource Integrity --- */
+      var scripts = Array.prototype.slice.call(document.scripts).filter(function (s) { return s.src; });
+      var noSri = scripts.filter(function (s) {
+        try {
+          var same = new URL(s.src, location.href).origin === location.origin;
+          return !same && !s.integrity;
+        } catch (e) { return false; }
+      });
+      add('sri', 'Subresource Integrity',
+        noSri.length ? 'warn' : 'pass',
+        noSri.length
+          ? noSri.length + ' cross-origin script(s) loaded without an integrity attribute.'
+          : 'All cross-origin scripts carry integrity (or none are used).');
+
+      /* --- inline handlers --- */
+      var handlers = countInlineHandlers(document);
+      add('inline-handlers', 'Inline event handlers',
+        handlers ? 'warn' : 'pass',
+        handlers
+          ? handlers + ' inline on* attribute(s) found — CSP blocks these unless hashed/nonced.'
+          : 'No inline on* handlers found.');
+
+      /* --- dangerous URLs --- */
+      var unsafe = findUnsafeUrls();
+      add('unsafe-urls', 'Dangerous URLs',
+        unsafe.length ? 'fail' : 'pass',
+        unsafe.length
+          ? unsafe.length + ' javascript:/data:text-html URL(s) present.'
+          : 'No javascript: or data:text/html URLs found.');
+
+      /* --- mixed content --- */
+      var mixed = [];
+      Array.prototype.forEach.call(document.querySelectorAll('[src],[href]'), function (el) {
+        var v = el.getAttribute('src') || el.getAttribute('href') || '';
+        if (location.protocol === 'https:' && /^http:\/\//i.test(v)) {
+          mixed.push(v.slice(0, 120));
+        }
+      });
+      add('mixed-content', 'Mixed content',
+        mixed.length ? 'fail' : 'pass',
+        mixed.length
+          ? mixed.length + ' insecure http:// subresource(s) on an https:// page.'
+          : 'No insecure subresources detected.');
+
+      /* --- iframes --- */
+      var frames = Array.prototype.slice.call(document.querySelectorAll('iframe'));
+      var unsandboxed = frames.filter(function (f) { return !f.hasAttribute('sandbox'); });
+      add('iframes', 'Framed content',
+        unsandboxed.length ? 'warn' : 'pass',
+        unsandboxed.length
+          ? unsandboxed.length + ' iframe(s) without a sandbox attribute.'
+          : 'No unsandboxed iframes.');
+
+      /* --- runtime detections --- */
+      var runtime = state.findings.slice(0, 40);
+      if (runtime.length) {
+        add('runtime', 'Runtime detections',
+          runtime.some(function (f) { return f.status === 'fail'; }) ? 'fail' : 'warn',
+          runtime.length + ' runtime event(s) recorded — open the log below.');
+      }
+
+      return out;
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 10. CloudCheck attestation
+   * ------------------------------------------------------------------ */
+  function loadAttestation() {
+    var result = {
+      status: 'unknown',
+      reason: '',
+      url: config.attestationUrl,
+      data: null,
+      summary: null,
+      signature: 'absent',
+      checkedAt: nowISO()
+    };
+
+    if (!config.attestationUrl) {
+      result.reason = 'No attestation URL configured.';
+      return Promise.resolve(result);
+    }
+    if (!global.fetch) {
+      result.status = 'unavailable';
+      result.reason = 'fetch() unavailable.';
+      return Promise.resolve(result);
+    }
+
+    return fetch(config.attestationUrl, {
+      cache: 'no-store',
+      credentials: 'same-origin'
+    }).then(function (res) {
+      if (!res.ok) {
+        result.status = 'unavailable';
+        result.reason = 'Attestation not published (HTTP ' + res.status + ').';
+        return result;
+      }
+      return res.json().catch(function () {
+        result.status = 'invalid';
+        result.reason = 'Attestation is not valid JSON.';
+        return result;
+      }).then(function (data) {
+        if (result.status === 'invalid') return result;
+        if (!data || typeof data !== 'object') {
+          result.status = 'invalid';
+          result.reason = 'Attestation is not a JSON object.';
+          return result;
+        }
+        result.data = data;
+
+        /* ---- structural validation ---- */
+        var problems = [];
+
+        var tool = String(data.tool || '').toLowerCase();
+        if (tool.indexOf('cloudcheck') === -1) problems.push('tool field is not "cloudcheck"');
+
+        var repo = String(data.repository || '').toLowerCase();
+        if (repo && repo.indexOf(CLOUDCHECK_REPO_HINT) === -1) {
+          problems.push('repository does not reference ' + CLOUDCHECK_REPO_HINT);
+        }
+
+        var generated = Date.parse(data.generated_at || data.generatedAt || '');
+        if (!isFinite(generated)) {
+          problems.push('generated_at missing or invalid');
+        } else {
+          var ageDays = (Date.now() - generated) / 86400000;
+          result.ageDays = Math.round(ageDays * 10) / 10;
+          if (ageDays > config.maxAttestationAgeDays) {
+            problems.push('attestation is older than ' + config.maxAttestationAgeDays + ' days');
+          }
+          if (ageDays < -1) problems.push('generated_at is in the future');
+        }
+
+        if (data.target) {
+          if (!config.allowAnyTarget && normalizeUrl(data.target) !== normalizeUrl(config.target)) {
+            problems.push('target mismatch (attestation is for ' + data.target + ')');
+          }
+        } else if (!config.allowAnyTarget) {
+          problems.push('target field missing');
+        }
+
+        /* ---- summary ---- */
+        var s = data.summary || {};
+        var pass = Number(s.pass !== undefined ? s.pass : (s.passed || 0)) || 0;
+        var fail = Number(s.fail !== undefined ? s.fail : (s.failed || 0)) || 0;
+        var warn = Number(s.warn !== undefined ? s.warn : (s.warnings || 0)) || 0;
+        result.summary = { pass: pass, fail: fail, warn: warn };
+
+        /* ---- signature (tamper-evidence only) ---- */
+        var signPromise;
+        if (typeof data.signature === 'string' && data.signature) {
+          var clone;
+          try { clone = JSON.parse(JSON.stringify(data)); }
+          catch (e) { clone = null; }
+          if (!clone) {
+            signPromise = Promise.resolve('unverifiable');
+          } else {
+            delete clone.signature;
+            signPromise = sha256Hex(stableStringify(clone)).then(function (digest) {
+              if (!digest) return 'unverifiable';
+              var expected = String(data.signature).replace(/^sha256:/i, '').trim().toLowerCase();
+              if (expected === digest) return 'match';
+              problems.push('signature mismatch — file changed after signing');
+              return 'mismatch';
+            });
+          }
+        } else {
+          signPromise = Promise.resolve('absent');
+        }
+
+        return signPromise.then(function (sig) {
+          result.signature = sig;
+
+          if (problems.length) {
+            result.status = 'invalid';
+            result.reason = problems.join('; ');
+          } else if (fail > 0) {
+            result.status = 'fail';
+            result.reason = fail + ' CloudCheck finding(s) failed.';
+          } else if (warn > 0) {
+            result.status = 'warn';
+            result.reason = warn + ' CloudCheck warning(s).';
+          } else {
+            result.status = 'pass';
+            result.reason = 'Attestation validated against CloudCheck output format.';
+          }
+
+          if (result.status === 'pass' && result.signature === 'absent') {
+            result.reason += ' Unsigned (self-published): verify in CI with your own key.';
+          }
+          return result;
+        });
+      });
+    }).catch(function (err) {
+      result.status = 'unavailable';
+      result.reason = 'Attestation could not be fetched: ' + (err && err.message ? err.message : 'network error');
+      return result;
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 11. Protections
+   * ------------------------------------------------------------------ */
+  function report(id, status, detail) {
+    if (state.destroyed) return;
+    var key = id + '|' + detail;
+    if (state.reportKeys.has(key)) return;
+    if (state.findings.length >= 200) return;
+    state.reportKeys.add(key);
+    state.findings.push({ id: id, status: status, detail: detail, at: nowISO() });
+    scheduleRender();
+  }
+
+  function hardenLinks() {
+    var links = document.querySelectorAll('a[target="_blank"]');
+    for (var i = 0; i < links.length; i++) {
+      var el = links[i];
+      var rel = (el.getAttribute('rel') || '').toLowerCase();
+      var parts = rel.split(/\s+/).filter(Boolean);
+      if (parts.indexOf('noopener') === -1) parts.push('noopener');
+      if (parts.indexOf('noreferrer') === -1) parts.push('noreferrer');
+      el.setAttribute('rel', parts.join(' '));
+    }
+  }
+
+  function neutralizeDangerousUrls() {
+    var targets = document.querySelectorAll('[href],[src],[action],[formaction],[data]');
+    for (var i = 0; i < targets.length; i++) {
+      var el = targets[i];
+      if (el.closest && el.closest('[data-hexguard]')) continue;
+      var attrs = ['href', 'src', 'action', 'formaction', 'data'];
+      for (var a = 0; a < attrs.length; a++) {
+        var v = el.getAttribute(attrs[a]);
+        if (v === null) continue;
+        if (!isSafeUrl(v)) {
+          report('unsafe-url', 'fail',
+            'Removed unsafe ' + attrs[a] + ' on <' + el.tagName.toLowerCase() + '>: ' + v.slice(0, 80));
+          try { el.setAttribute(attrs[a], '#'); } catch (e) { el.removeAttribute(attrs[a]); }
+        }
+      }
+    }
+  }
+
+  function inspectInjectedNode(root) {
+    if (!root || root.nodeType !== 1) return;
+    if (root.hasAttribute && root.hasAttribute('data-hexguard')) return;
+
+    var queue = [root];
+    var guard = 0;
+
+    while (queue.length && guard < 5000) {
+      guard++;
+      var el = queue.pop();
+      if (!el || el.nodeType !== 1) continue;
+
+      var attrs = el.attributes || [];
+      for (var a = 0; a < attrs.length; a++) {
+        var name = attrs[a].name.toLowerCase();
+        var value = attrs[a].value;
+
+        if (name.indexOf('on') === 0) {
+          report('inline-handler-injected', 'warn',
+            'Runtime-injected inline handler ' + name + ' on <' + el.tagName.toLowerCase() + '>');
+          if (config.enforce) {
+            try { el.removeAttribute(attrs[a].name); } catch (e) { /* ignore */ }
+          }
+        }
+
+        if ((name === 'href' || name === 'src') && !isSafeUrl(value)) {
+          report('dangerous-url-injected', 'fail',
+            'Blocked unsafe URL in <' + el.tagName.toLowerCase() + ' ' + name + '>');
+          try { el.setAttribute(name, '#'); } catch (e) { /* ignore */ }
+        }
+      }
+
+      if (el.tagName === 'SCRIPT') {
+        var src = el.getAttribute('src');
+        if (!src) {
+          report('inline-script-injected', 'warn',
+            'Inline <script> injected at runtime (already executed if inserted by a script).');
+          if (config.enforce) {
+            try { el.remove(); } catch (e) { /* ignore */ }
+          }
+        } else {
+          try {
+            var u = new URL(src, location.href);
+            if (u.origin !== location.origin) {
+              report('remote-script-injected', 'warn',
+                'Runtime-injected remote script from ' + u.origin);
+            }
+          } catch (e) { /* ignore */ }
+        }
+      }
+
+      if (el.children) {
+        for (var c = 0; c < el.children.length; c++) queue.push(el.children[c]);
+      }
+    }
+  }
+
+  function watchMutations() {
+    if (!('MutationObserver' in global)) return;
+    if (state.observer) return;
+
+    var seen = new WeakSet();
+
+    state.observer = new MutationObserver(function (records) {
+      for (var r = 0; r < records.length; r++) {
+        var added = records[r].addedNodes;
+        for (var n = 0; n < added.length; n++) {
+          var node = added[n];
+          if (node.nodeType !== 1) continue;
+          if (seen.has(node)) continue;
+          seen.add(node);
+          try { inspectInjectedNode(node); } catch (e) { log('inspect failed', e); }
+        }
+      }
+    });
+
+    state.observer.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  function applyMetaHardening() {
+    if (!config.harden) return;
+
+    var hasBase = !!document.querySelector('base[href]');
+    var externalForm = false;
+    Array.prototype.forEach.call(document.forms || [], function (f) {
+      try {
+        var action = f.getAttribute('action') || location.href;
+        if (new URL(action, location.href).origin !== location.origin) externalForm = true;
+      } catch (e) { /* ignore */ }
+    });
+
+    if (!readMetaCsp()) {
+      var directives = ["object-src 'none'"];
+      if (!hasBase) directives.push("base-uri 'self'");
+      if (!externalForm) directives.push("form-action 'self'");
+
+      var meta = document.createElement('meta');
+      meta.setAttribute('http-equiv', 'Content-Security-Policy');
+      meta.setAttribute('content', directives.join('; '));
+      meta.setAttribute('data-hexguard', 'meta-csp');
+      (document.head || document.documentElement).appendChild(meta);
+
+      report('meta-hardening', 'info',
+        'Injected baseline CSP meta: ' + directives.join('; '));
+    }
+
+    if (!readMetaReferrer()) {
+      var ref = document.createElement('meta');
+      ref.setAttribute('name', 'referrer');
+      ref.setAttribute('content', 'strict-origin-when-cross-origin');
+      ref.setAttribute('data-hexguard', 'meta-referrer');
+      (document.head || document.documentElement).appendChild(ref);
+    }
+  }
+
+  function installDevtoolsGuard() {
+    var start = Date.now();
+    var interval = setInterval(function () {
+      if (state.destroyed) { clearInterval(interval); return; }
+
+      var t0 = Date.now();
+      try {
+        /* eslint-disable no-debugger */
+        debugger;
+        /* eslint-enable no-debugger */
+      } catch (e) { /* ignore */ }
+      var delta = Date.now() - t0;
+
+      if (delta > 120) {
+        report('devtools-open', 'warn',
+          'DevTools appear to be open (debugger pause ' + delta + ' ms).');
+
+        if (config.devtoolsMode === 'wipe') {
+          try {
+            document.head.innerHTML = '';
+            document.body.innerHTML = '';
+          } catch (e) { /* ignore */ }
+          clearInterval(interval);
+          location.reload();
+        }
+      }
+
+      /* Spoof detection: natives must still be natives. */
+      if (Date.now.toString().indexOf('[native code]') === -1) {
+        report('spoofed-native', 'fail',
+          'A built-in function has been overwritten (tampering detected).');
+      }
+
+      if (Date.now() - start > 1000 * 60 * 60) clearInterval(interval);
+    }, 1000);
+
+    state.timers.push(interval);
+  }
+
+  function installConsoleGuard() {
+    var methods = ['log', 'debug', 'info', 'warn', 'error', 'dir', 'dirxml',
+                   'table', 'trace', 'assert', 'group', 'groupCollapsed', 'groupEnd'];
+    methods.forEach(function (name) {
+      try {
+        if (console[name]) console[name] = function () { return undefined; };
+      } catch (e) { /* read-only in some browsers */ }
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 12. UI
+   * ------------------------------------------------------------------ */
+  var STYLES = [
+    ':host{all:initial;}',
+    '*{box-sizing:border-box;}',
+    '.hg-root{position:fixed;z-index:2147483000;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.45;}',
+    '.hg-root.br{right:16px;bottom:16px;}',
+    '.hg-root.bl{left:16px;bottom:16px;}',
+    '.hg-root.tr{right:16px;top:16px;}',
+    '.hg-root.tl{left:16px;top:16px;}',
+    '.hg-fab{display:flex;align-items:center;gap:8px;border:1px solid rgba(255,255,255,.14);background:#0f172a;color:#e2e8f0;border-radius:999px;padding:8px 14px 8px 10px;cursor:pointer;box-shadow:0 8px 28px rgba(0,0,0,.45);transition:transform .15s ease,box-shadow .15s ease;}',
+    '.hg-fab:hover{transform:translateY(-1px);box-shadow:0 12px 34px rgba(0,0,0,.55);}',
+    '.hg-fab:focus-visible{outline:2px solid #38bdf8;outline-offset:2px;}',
+    '.hg-fab svg{width:18px;height:18px;flex:0 0 auto;}',
+    '.hg-fab .hg-label{font-weight:600;letter-spacing:.2px;white-space:nowrap;}',
+    '.hg-dot{width:9px;height:9px;border-radius:50%;background:#94a3b8;box-shadow:0 0 0 3px rgba(148,163,184,.18);flex:0 0 auto;}',
+    '.hg-dot.pass{background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.2);}',
+    '.hg-dot.warn{background:#f59e0b;box-shadow:0 0 0 3px rgba(245,158,11,.2);}',
+    '.hg-dot.fail{background:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.2);}',
+    '.hg-dot.info{background:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.2);}',
+    '.hg-dot.pending{background:#a78bfa;box-shadow:0 0 0 3px rgba(167,139,250,.2);}',
+    '.hg-panel{position:absolute;bottom:calc(100% + 10px);right:0;width:340px;max-width:calc(100vw - 32px);max-height:min(70vh,560px);overflow:auto;background:#0f172a;color:#e2e8f0;border:1px solid rgba(255,255,255,.12);border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.6);}',
+    '.hg-root.bl .hg-panel,.hg-root.tl .hg-panel{right:auto;left:0;}',
+    '.hg-root.tr .hg-panel,.hg-root.tl .hg-panel{bottom:auto;top:calc(100% + 10px);}',
+    '.hg-head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.08);position:sticky;top:0;background:#0f172a;z-index:2;}',
+    '.hg-head strong{font-size:13px;letter-spacing:.3px;}',
+    '.hg-head .hg-ver{font-size:11px;color:#64748b;}',
+    '.hg-close{margin-left:auto;background:transparent;border:0;color:#94a3b8;font-size:18px;line-height:1;cursor:pointer;padding:2px 6px;border-radius:6px;}',
+    '.hg-close:hover{background:rgba(255,255,255,.08);color:#e2e8f0;}',
+    '.hg-summary{padding:12px 14px 6px;display:flex;flex-wrap:wrap;gap:6px;}',
+    '.hg-pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid rgba(255,255,255,.12);color:#cbd5e1;}',
+    '.hg-pill.pass{border-color:rgba(34,197,94,.4);color:#86efac;}',
+    '.hg-pill.warn{border-color:rgba(245,158,11,.4);color:#fcd34d;}',
+    '.hg-pill.fail{border-color:rgba(239,68,68,.45);color:#fca5a5;}',
+    '.hg-pill.info{border-color:rgba(56,189,248,.4);color:#7dd3fc;}',
+    '.hg-list{list-style:none;margin:0;padding:6px 10px 10px;}',
+    '.hg-item{display:flex;gap:9px;padding:8px 6px;border-radius:9px;}',
+    '.hg-item+.hg-item{border-top:1px solid rgba(255,255,255,.05);}',
+    '.hg-chip{width:8px;height:8px;border-radius:50%;margin-top:6px;flex:0 0 auto;background:#94a3b8;}',
+    '.hg-item.pass .hg-chip{background:#22c55e;}',
+    '.hg-item.warn .hg-chip{background:#f59e0b;}',
+    '.hg-item.fail .hg-chip{background:#ef4444;}',
+    '.hg-item.info .hg-chip{background:#38bdf8;}',
+    '.hg-item .hg-lbl{font-weight:600;font-size:12px;}',
+    '.hg-item .hg-det{color:#94a3b8;font-size:11.5px;word-break:break-word;}',
+    '.hg-attest{margin:0 14px 10px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);}',
+    '.hg-attest .hg-at{font-size:12px;font-weight:600;display:flex;align-items:center;gap:7px;}',
+    '.hg-attest .hg-ad{font-size:11.5px;color:#94a3b8;margin-top:4px;word-break:break-word;}',
+    '.hg-attest a{color:#38bdf8;text-decoration:none;}',
+    '.hg-attest a:hover{text-decoration:underline;}',
+    '.hg-foot{display:flex;align-items:center;gap:10px;padding:10px 14px;border-top:1px solid rgba(255,255,255,.08);position:sticky;bottom:0;background:#0f172a;}',
+    '.hg-foot a{color:#38bdf8;text-decoration:none;font-size:11.5px;}',
+    '.hg-foot a:hover{text-decoration:underline;}',
+    '.hg-btn{margin-left:auto;background:#1e293b;color:#e2e8f0;border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:5px 11px;font-size:11.5px;cursor:pointer;}',
+    '.hg-btn:hover{background:#273449;}',
+    '.hg-btn:disabled{opacity:.55;cursor:default;}',
+    '@media (prefers-color-scheme: light){',
+    '  :host([data-theme="auto"]) .hg-fab,:host([data-theme="auto"]) .hg-panel,:host([data-theme="auto"]) .hg-head,:host([data-theme="auto"]) .hg-foot{background:#ffffff;color:#0f172a;border-color:rgba(15,23,42,.12);}',
+    '  :host([data-theme="auto"]) .hg-head,:host([data-theme="auto"]) .hg-foot{background:#ffffff;}',
+    '  :host([data-theme="auto"]) .hg-item .hg-det,:host([data-theme="auto"]) .hg-attest .hg-ad,:host([data-theme="auto"]) .hg-head .hg-ver{color:#64748b;}',
+    '  :host([data-theme="auto"]) .hg-attest{background:rgba(15,23,42,.03);border-color:rgba(15,23,42,.08);}',
+    '  :host([data-theme="auto"]) .hg-btn{background:#f1f5f9;color:#0f172a;border-color:rgba(15,23,42,.12);}',
+    '}',
+    ':host([data-theme="light"]) .hg-fab,:host([data-theme="light"]) .hg-panel,:host([data-theme="light"]) .hg-head,:host([data-theme="light"]) .hg-foot{background:#ffffff;color:#0f172a;border-color:rgba(15,23,42,.12);}',
+    ':host([data-theme="light"]) .hg-item .hg-det,:host([data-theme="light"]) .hg-attest .hg-ad,:host([data-theme="light"]) .hg-head .hg-ver{color:#64748b;}',
+    ':host([data-theme="light"]) .hg-attest{background:rgba(15,23,42,.03);border-color:rgba(15,23,42,.08);}',
+    ':host([data-theme="light"]) .hg-btn{background:#f1f5f9;color:#0f172a;border-color:rgba(15,23,42,.12);}'
+  ].join('');
+
+  var SHIELD_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M12 2.5 4.5 5.5v6c0 5 3.2 8.4 7.5 10 4.3-1.6 7.5-5 7.5-10v-6L12 2.5Z"/>' +
+    '<path d="m8.8 12.1 2.2 2.2 4.3-4.4"/></svg>';
+
+  var MARKUP = [
+    '<div class="hg-root ' + config.position + '">',
+    '  <button class="hg-fab" type="button" aria-expanded="false" aria-label="HexGuard protection status">',
+    '    ' + SHIELD_SVG,
+    '    <span class="hg-dot" id="hg-dot"></span>',
+    '    <span class="hg-label" id="hg-fab-label">HexGuard</span>',
+    '  </button>',
+    '  <div class="hg-panel" id="hg-panel" hidden>',
+    '    <div class="hg-head">',
+    '      <strong>HexGuard</strong>',
+    '      <span class="hg-ver">v' + VERSION + '</span>',
+    '      <button class="hg-close" type="button" id="hg-close" aria-label="Close">&times;</button>',
+    '    </div>',
+    '    <div class="hg-summary" id="hg-summary"></div>',
+    '    <ul class="hg-list" id="hg-list"></ul>',
+    '    <div class="hg-attest" id="hg-attest"></div>',
+    '    <div class="hg-foot">',
+    '      <a href="' + CLOUDCHECK_REPO + '" target="_blank" rel="noopener noreferrer">CloudCheck</a>',
+    '      <button class="hg-btn" type="button" id="hg-rescan">Rescan</button>',
+    '    </div>',
+    '  </div>',
+    '</div>'
+  ].join('\n');
+
+  function statusColor(status) {
+    return status === 'pass' ? 'pass'
+      : status === 'fail' ? 'fail'
+      : status === 'warn' ? 'warn'
+      : status === 'info' ? 'info'
+      : 'pending';
+  }
+
+  function overallStatus(findings) {
+    var has = { fail: false, warn: false, pending: false };
+    for (var i = 0; i < findings.length; i++) {
+      if (findings[i].status === 'fail') has.fail = true;
+      if (findings[i].status === 'warn') has.warn = true;
+      if (findings[i].status === 'pending') has.pending = true;
+    }
+    if (has.fail) return 'fail';
+    if (has.warn) return 'warn';
+    if (has.pending) return 'pending';
+    return 'pass';
+  }
+
+  function createUI() {
+    if (state.ui) return state.ui;
+
+    var host = document.createElement('div');
+    host.id = 'hexguard-widget';
+    host.setAttribute('data-hexguard', 'ui');
+    if (config.theme !== 'auto') host.setAttribute('data-theme', config.theme);
+
+    var shadow;
+    try {
+      shadow = host.attachShadow({ mode: 'open' });
+    } catch (e) {
+      log('Shadow DOM unavailable', e);
+      return null;
+    }
+
+    var style = document.createElement('style');
+    style.textContent = STYLES;
+    shadow.appendChild(style);
+
+    var container = document.createElement('div');
+    setHTML(container, MARKUP);
+    while (container.firstChild) shadow.appendChild(container.firstChild);
+
+    (document.body || document.documentElement).appendChild(host);
+
+    var ui = {
+      host: host,
+      shadow: shadow,
+      root: shadow.querySelector('.hg-root'),
+      fab: shadow.getElementById('hg-fab-label') ? shadow.querySelector('.hg-fab') : null,
+      dot: shadow.getElementById('hg-dot'),
+      panel: shadow.getElementById('hg-panel'),
+      summary: shadow.getElementById('hg-summary'),
+      list: shadow.getElementById('hg-list'),
+      attest: shadow.getElementById('hg-attest'),
+      close: shadow.getElementById('hg-close'),
+      rescan: shadow.getElementById('hg-rescan')
+    };
+    if (!ui.fab) ui.fab = shadow.querySelector('.hg-fab');
+
+    ui.fab.addEventListener('click', function () {
+      if (ui.panel.hidden) openPanel(); else closePanel();
+    });
+
+    ui.close.addEventListener('click', closePanel);
+
+    ui.rescan.addEventListener('click', function () {
+      ui.rescan.disabled = true;
+      scan().then(function () { ui.rescan.disabled = false; });
+    });
+
+    state.ui = ui;
+    return ui;
+  }
+
+  function openPanel() {
+    var ui = createUI();
+    if (!ui) return;
+    ui.panel.hidden = false;
+    ui.fab.setAttribute('aria-expanded', 'true');
+    renderUI();
+  }
+
+  function closePanel() {
+    if (!state.ui) return;
+    state.ui.panel.hidden = true;
+    state.ui.fab.setAttribute('aria-expanded', 'false');
+  }
+
+  function togglePanel() {
+    var ui = createUI();
+    if (!ui) return;
+    if (ui.panel.hidden) openPanel(); else closePanel();
+  }
+
+  function renderUI() {
+    var ui = state.ui;
+    if (!ui || state.destroyed) return;
+
+    var report = state.report;
+    var findings = report ? report.findings : [];
+    var overall = report ? report.status : 'pending';
+
+    ui.dot.className = 'hg-dot ' + statusColor(overall);
+    ui.fab.setAttribute('aria-label',
+      'HexGuard protection status: ' + overall.toUpperCase() +
+      (report ? ' (' + findings.length + ' checks)' : ''));
+
+    /* ---- summary pills ---- */
+    while (ui.summary.firstChild) ui.summary.removeChild(ui.summary.firstChild);
+
+    function pill(text, status) {
+      var span = document.createElement('span');
+      span.className = 'hg-pill ' + (status || '');
+      span.textContent = text;
+      ui.summary.appendChild(span);
+    }
+
+    if (report) {
+      var counts = { pass: 0, warn: 0, fail: 0, info: 0, pending: 0 };
+      findings.forEach(function (f) { counts[f.status] = (counts[f.status] || 0) + 1; });
+      pill('Overall: ' + overall.toUpperCase(), overall);
+      if (counts.pass) pill(counts.pass + ' pass', 'pass');
+      if (counts.warn) pill(counts.warn + ' warn', 'warn');
+      if (counts.fail) pill(counts.fail + ' fail', 'fail');
+      if (counts.info) pill(counts.info + ' info', 'info');
+    } else {
+      pill('Scanning…', 'pending');
+    }
+
+    /* ---- findings list ---- */
+    while (ui.list.firstChild) ui.list.removeChild(ui.list.firstChild);
+
+    findings.forEach(function (f) {
+      var li = document.createElement('li');
+      li.className = 'hg-item ' + statusColor(f.status);
+
+      var chip = document.createElement('span');
+      chip.className = 'hg-chip';
+
+      var body = document.createElement('div');
+      var label = document.createElement('div');
+      label.className = 'hg-lbl';
+      label.textContent = f.label || f.id;
+      var detail = document.createElement('div');
+      detail.className = 'hg-det';
+      detail.textContent = f.detail || '';
+
+      body.appendChild(label);
+      if (f.detail) body.appendChild(detail);
+      li.appendChild(chip);
+      li.appendChild(body);
+      ui.list.appendChild(li);
+    });
+
+    if (!findings.length) {
+      var liEmpty = document.createElement('li');
+      liEmpty.className = 'hg-item info';
+      var chip2 = document.createElement('span');
+      chip2.className = 'hg-chip';
+      var body2 = document.createElement('div');
+      var lbl2 = document.createElement('div');
+      lbl2.className = 'hg-lbl';
+      lbl2.textContent = 'Initializing';
+      var det2 = document.createElement('div');
+      det2.className = 'hg-det';
+      det2.textContent = 'Collecting checks…';
+      body2.appendChild(lbl2);
+      body2.appendChild(det2);
+      liEmpty.appendChild(chip2);
+      liEmpty.appendChild(body2);
+      ui.list.appendChild(liEmpty);
+    }
+
+    /* ---- attestation block ---- */
+    while (ui.attest.firstChild) ui.attest.removeChild(ui.attest.firstChild);
+
+    var att = state.attestation;
+    var at = document.createElement('div');
+    at.className = 'hg-at';
+    var atDot = document.createElement('span');
+    atDot.className = 'hg-dot ' + statusColor(att ? (att.status === 'pass' ? 'pass' : att.status === 'fail' ? 'fail' : att.status === 'warn' ? 'warn' : 'info') : 'pending');
+    var atText = document.createElement('span');
+    atText.textContent = 'CloudCheck: ' + (att ? String(att.status).toUpperCase() : 'CHECKING…');
+    at.appendChild(atDot);
+    at.appendChild(atText);
+    ui.attest.appendChild(at);
+
+    var ad = document.createElement('div');
+    ad.className = 'hg-ad';
+
+    if (!att) {
+      ad.textContent = 'Loading attestation…';
+    } else {
+      var parts = [];
+      if (att.reason) parts.push(att.reason);
+      if (att.summary) {
+        parts.push('pass ' + att.summary.pass + ' / warn ' + att.summary.warn + ' / fail ' + att.summary.fail);
+      }
+      if (att.ageDays !== undefined) parts.push('age ' + att.ageDays + 'd');
+      if (att.signature && att.signature !== 'absent') parts.push('signature: ' + att.signature);
+      ad.textContent = parts.join(' · ') || 'No attestation data.';
+
+      if (att.url) {
+        var link = document.createElement('a');
+        link.href = att.url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = ' View attestation file';
+        ad.appendChild(link);
+      }
+    }
+    ui.attest.appendChild(ad);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 13. Scan orchestration
+   * ------------------------------------------------------------------ */
+  function scan() {
+    if (state.destroyed) return Promise.resolve(null);
+
+    return runChecks().then(function (findings) {
+      return loadAttestation().then(function (att) {
+        state.attestation = att;
+
+        findings.push({
+          id: 'cloudcheck-attestation',
+          label: 'CloudCheck attestation',
+          status: att.status === 'pass' ? 'pass'
+                : att.status === 'fail' ? 'fail'
+                : att.status === 'warn' ? 'warn'
+                : att.status === 'invalid' ? 'fail'
+                : 'warn',
+          detail: (att.reason || '') +
+            (att.url ? ' (' + att.url + ')' : '')
+        });
+
+        var report = {
+          version: VERSION,
+          target: config.target,
+          page: location.href,
+          scannedAt: nowISO(),
+          status: overallStatus(findings),
+          findings: findings,
+          attestation: att,
+          runtime: state.findings.slice()
+        };
+
+        state.report = report;
+        scheduleRender();
+        log('scan complete', report);
+        return report;
+      });
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 14. Public API
+   * ------------------------------------------------------------------ */
+  var HexGuard = {
+    version: VERSION,
+    config: config,
+
+    sanitize: function (html, options) { return sanitizeHtml(html, options); },
+
+    /* Sanitize a live subtree in place (opt-in; never automatic). */
+    protect: function (root) {
+      var node = root || document.body;
+      if (!node) return 0;
+      var count = 0;
+      Array.prototype.forEach.call(node.querySelectorAll('*'), function (el) {
+        var dirty = false;
+        var attrs = el.attributes || [];
+        for (var i = 0; i < attrs.length; i++) {
+          var name = attrs[i].name.toLowerCase();
+          if (name.indexOf('on') === 0) { dirty = true; break; }
+          if ((name === 'href' || name === 'src') && !isSafeUrl(attrs[i].value)) { dirty = true; break; }
+        }
+        if (dirty) {
+          el.setAttribute('data-hexguard-clean', sanitizeHtml(el.outerHTML));
+          count++;
+        }
+      });
+      return count;
+    },
+
+    scan: scan,
+
+    report: function () { return state.report; },
+
+    open: openPanel,
+    close: closePanel,
+    toggle: togglePanel,
+
+    destroy: function () {
+      state.destroyed = true;
+      try { if (state.observer) state.observer.disconnect(); } catch (e) { /* ignore */ }
+      state.observer = null;
+      state.timers.forEach(function (t) { clearTimeout(t); clearInterval(t); });
+      state.timers = [];
+      if (state.ui && state.ui.host && state.ui.host.parentNode) {
+        state.ui.host.parentNode.removeChild(state.ui.host);
+      }
+      state.ui = null;
+      delete global.__HEXGUARD__;
+      log('destroyed');
+    }
+  };
+
+  global.HexGuard = HexGuard;
+  global.__HEXGUARD__ = HexGuard;
+
+  /* ------------------------------------------------------------------ *
+   * 15. Boot
+   * ------------------------------------------------------------------ */
+  function boot() {
+    if (state.ready || state.destroyed) return;
+    state.ready = true;
+
+    try { applyMetaHardening(); } catch (e) { log('meta hardening failed', e); }
+    try { hardenLinks(); } catch (e) { log('link hardening failed', e); }
+    try { neutralizeDangerousUrls(); } catch (e) { log('URL neutralization failed', e); }
+    try { watchMutations(); } catch (e) { log('mutation watcher failed', e); }
+
+    if (config.consoleGuard) {
+      try { installConsoleGuard(); } catch (e) { log('console guard failed', e); }
+    }
+    if (config.devtoolsGuard) {
+      try { installDevtoolsGuard(); } catch (e) { log('devtools guard failed', e); }
+    }
+
+    try { createUI(); } catch (e) { log('UI creation failed', e); }
+    scheduleRender();
+
+    loadPurify().then(function () {
+      scheduleRender();
+      if (config.autoScan) {
+        scan().then(function () {
+          if (config.open) openPanel();
+        });
+      }
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  } else {
+    boot();
+  }
+
+})(window);
+</script>
 </body>
 </html>
