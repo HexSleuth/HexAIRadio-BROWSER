@@ -4077,12 +4077,13 @@ if (document.addEventListener) {
 
 })(window);
 </script>
-  <script>
+<script>
 (() => {
   'use strict';
 
-  if (window.__HEX_AI_RADIO_PLUGIN_LOADED__) return;
-  window.__HEX_AI_RADIO_PLUGIN_LOADED__ = true;
+  if (window.__HEX_AI_RADIO_PLUGIN_ACTIVE__) {
+    try { window.__HEX_AI_RADIO_PLUGIN_ACTIVE__.destroy(); } catch {}
+  }
 
   // ==========================================
   // 1. DOLBY ATMOS (E-AC-3 JOC & AC-4) MEDIA CAPABILITIES CHECK
@@ -4229,25 +4230,30 @@ if (document.addEventListener) {
   const sliderComp = document.getElementById('sliderComp');
 
   function initAudioEnhancer() {
-    if (audioCtx || !audioElement) return;
+    if (!audioElement) return;
+    if (audioCtx && dspConnected) return;
+
     try {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      audioCtx = new AudioContextClass({ sampleRate: 48000 });
-      sourceNode = audioCtx.createMediaElementSource(audioElement);
+      if (!AudioContextClass) return;
 
-      // 1. Bass Boost (Low-shelf filter)
+      if (!audioCtx) {
+        audioCtx = new AudioContextClass({ sampleRate: 48000 });
+      }
+      if (!sourceNode) {
+        sourceNode = audioCtx.createMediaElementSource(audioElement);
+      }
+
       bassFilter = audioCtx.createBiquadFilter();
       bassFilter.type = 'lowshelf';
       bassFilter.frequency.value = 150;
-      bassFilter.gain.value = 0;
+      bassFilter.gain.value = sliderBass ? parseFloat(sliderBass.value) || 0 : 0;
 
-      // 2. Vocal / Treble Clarity (High-shelf filter)
       trebleFilter = audioCtx.createBiquadFilter();
       trebleFilter.type = 'highshelf';
       trebleFilter.frequency.value = 3500;
-      trebleFilter.gain.value = 0;
+      trebleFilter.gain.value = sliderTreble ? parseFloat(sliderTreble.value) || 0 : 0;
 
-      // 3. True Stereo / Virtual Atmos Haas Spatial Widener + Panner
       stereoPanner = audioCtx.createStereoPanner();
       stereoPanner.pan.value = 0;
 
@@ -4265,17 +4271,17 @@ if (document.addEventListener) {
       spatialDelayR = audioCtx.createDelay(0.05);
       spatialDelayR.delayTime.value = 0.013;
 
-      // 4. Dynamic Range Compressor
       compressor = audioCtx.createDynamicsCompressor();
-      compressor.threshold.value = -24;
+      compressor.threshold.value = sliderComp ? parseFloat(sliderComp.value) || -24 : -24;
       compressor.knee.value = 30;
       compressor.ratio.value = 12;
       compressor.attack.value = 0.003;
       compressor.release.value = 0.25;
 
-      // 5. Real-Time Spectrum Analyser
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 128;
+
+      try { sourceNode.disconnect(); } catch {}
 
       sourceNode.connect(bassFilter).connect(trebleFilter);
 
@@ -4296,13 +4302,16 @@ if (document.addEventListener) {
         .connect(audioCtx.destination);
 
       dspConnected = true;
+      updateDspValues();
       startVisualizer();
     } catch (err) {
       console.warn('Web Audio DSP fallback:', err);
+      dspConnected = false;
       if (corsBadge) {
         corsBadge.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Direct Stream Mode';
         corsBadge.className = 'badge-pill warn';
       }
+      startVisualizer();
     }
   }
 
@@ -4338,7 +4347,7 @@ if (document.addEventListener) {
     if (!el) return;
     el.addEventListener('input', () => {
       initAudioEnhancer();
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
       isEnhanced = true;
       if (toggleBtn) {
         toggleBtn.className = 'btn active-enhance';
@@ -4351,7 +4360,7 @@ if (document.addEventListener) {
   if (toggleBtn) {
     toggleBtn.addEventListener('click', () => {
       initAudioEnhancer();
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
 
       isEnhanced = !isEnhanced;
       if (isEnhanced) {
@@ -4374,18 +4383,17 @@ if (document.addEventListener) {
   }
 
   // ==========================================
-  // 3. SPECTRUM VISUALIZER
+  // 3. SPECTRUM VISUALIZER (LIVE ANALYSER + AUTO STREAM PULSE FALLBACK)
   // ==========================================
   function startVisualizer() {
-    if (!analyser) return;
     if (visualizerRafId) cancelAnimationFrame(visualizerRafId);
     const canvas = document.getElementById('visualizer');
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
+    const binCount = analyser ? analyser.frequencyBinCount : 64;
+    const dataArray = new Uint8Array(binCount);
 
-    function draw() {
+    function draw(nowMs) {
       visualizerRafId = requestAnimationFrame(draw);
       const dpr = window.devicePixelRatio || 1;
       const targetW = Math.max(1, Math.floor(canvas.clientWidth * dpr));
@@ -4396,11 +4404,38 @@ if (document.addEventListener) {
       }
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      analyser.getByteFrequencyData(dataArray);
-      const barWidth = (canvas.width / bufferLength) * 1.4;
+      let hasSignal = false;
+      if (analyser && dspConnected && audioCtx && audioCtx.state === 'running') {
+        analyser.getByteFrequencyData(dataArray);
+        for (let i = 0; i < binCount; i++) {
+          if (dataArray[i] > 2) {
+            hasSignal = true;
+            break;
+          }
+        }
+      }
+
+      const isPlayingStream = Boolean(audioElement && !audioElement.paused && (audioElement.currentSrc || audioElement.src));
+      if (!hasSignal) {
+        const t = (nowMs || performance.now()) * 0.004;
+        const bassBoost = sliderBass ? Math.max(0.4, 1 + parseFloat(sliderBass.value) / 20) : 1;
+        const trebleBoost = sliderTreble ? Math.max(0.4, 1 + parseFloat(sliderTreble.value) / 20) : 1;
+        for (let i = 0; i < binCount; i++) {
+          if (!isPlayingStream) {
+            dataArray[i] = 0;
+          } else {
+            const norm = i / binCount;
+            const eqWeight = norm < 0.25 ? bassBoost : norm > 0.65 ? trebleBoost : 1;
+            const wave = Math.abs(Math.sin(t * 1.7 + i * 0.32) * Math.cos(t * 0.85 - i * 0.14));
+            dataArray[i] = Math.min(255, Math.floor((28 + wave * 155) * eqWeight));
+          }
+        }
+      }
+
+      const barWidth = (canvas.width / binCount) * 1.4;
       let x = 0;
 
-      for (let i = 0; i < bufferLength; i++) {
+      for (let i = 0; i < binCount; i++) {
         const barHeight = (dataArray[i] / 255) * canvas.height * 0.9;
         const grad = ctx.createLinearGradient(0, canvas.height, 0, 0);
         grad.addColorStop(0, '#4facfe');
@@ -4410,7 +4445,7 @@ if (document.addEventListener) {
         x += barWidth;
       }
     }
-    draw();
+    visualizerRafId = requestAnimationFrame(draw);
   }
 
   // ==========================================
@@ -4419,143 +4454,179 @@ if (document.addEventListener) {
   let currentTrackMeta = { name: 'Live Stream', tags: 'radio, music' };
   let activeStationRecord = null;
   let trackPollTimer = null;
-  let lastDetectedTrackTitle = '';
+  let lastAppliedTrack = '';
 
-  function applyDetectedTrackInfo(trackTitle, stationName, extraSub = '') {
-    const cleanTrack = (trackTitle || '').trim();
-    const baseStation = (stationName || activeStationRecord?.name || document.getElementById('nowTitle')?.textContent || 'Live Stream').trim();
-    const nowTitleEl = document.getElementById('nowTitle');
-    const nowSubEl = document.getElementById('nowSub');
+  function syncEqVisualizerTrackDisplay(trackOrStation, stationSubtitle = '', tagsText = '') {
+    const titleEl = document.getElementById('nowTitle');
+    const subEl = document.getElementById('nowSub');
+    const cleanTitle = (trackOrStation || '').trim();
+    if (!cleanTitle) return;
 
-    if (cleanTrack && cleanTrack !== baseStation && cleanTrack !== lastDetectedTrackTitle) {
-      lastDetectedTrackTitle = cleanTrack;
-      currentTrackMeta = {
-        name: `${cleanTrack} — ${baseStation}`,
-        tags: activeStationRecord?.tags || currentTrackMeta.tags || 'live radio, music'
-      };
-      if (nowTitleEl) nowTitleEl.textContent = cleanTrack;
-      if (nowSubEl) {
-        const tagsPart = activeStationRecord?.tags ? ` • ${activeStationRecord.tags}` : '';
-        nowSubEl.textContent = extraSub || `${baseStation}${tagsPart}`;
+    if (tagsText) {
+      currentTrackMeta.tags = tagsText;
+    }
+
+    if (cleanTitle !== lastAppliedTrack) {
+      lastAppliedTrack = cleanTitle;
+      currentTrackMeta.name = activeStationRecord?.name && cleanTitle !== activeStationRecord.name
+        ? `${cleanTitle} — ${activeStationRecord.name}`
+        : cleanTitle;
+
+      if (titleEl && titleEl.textContent.trim() !== cleanTitle) {
+        titleEl.textContent = cleanTitle;
+      }
+      if (subEl && stationSubtitle) {
+        subEl.textContent = stationSubtitle;
       }
       if ('mediaSession' in navigator && typeof MediaMetadata !== 'undefined') {
         navigator.mediaSession.metadata = new MediaMetadata({
-          title: cleanTrack,
-          artist: baseStation,
+          title: cleanTitle,
+          artist: activeStationRecord?.name || 'HexAI Audio Enhancer',
           album: 'HexAIRadio-BROWSER Live EQ'
         });
       }
     }
   }
 
-  async function fetchLiveStreamTrackMetadata(stationOrUrl) {
-    const streamUrl = typeof stationOrUrl === 'string'
-      ? stationOrUrl
-      : (stationOrUrl?.url_resolved || stationOrUrl?.url || audioElement?.currentSrc || audioElement?.src || '');
-    if (!streamUrl || !streamUrl.startsWith('https://')) return;
+  async function autoDetectAndFetchLiveAudio() {
+    const activeSrc = audioElement?.currentSrc || audioElement?.src || activeStationRecord?.url_resolved || '';
+    if (!activeSrc) return;
 
-    // 1. Check browser MediaSession / audio element metadata first
+    // Auto-hook Web Audio EQ + Visualizer whenever stream is active
+    if (!dspConnected) {
+      initAudioEnhancer();
+    }
+    if (audioCtx && audioCtx.state === 'suspended' && audioElement && !audioElement.paused) {
+      audioCtx.resume().catch(() => {});
+    }
+    if (!visualizerRafId) {
+      startVisualizer();
+    }
+
+    // Check MediaSession metadata if updated by browser/stream
     if ('mediaSession' in navigator && navigator.mediaSession.metadata?.title) {
       const msTitle = navigator.mediaSession.metadata.title;
       const msArtist = navigator.mediaSession.metadata.artist;
       if (msTitle && msTitle !== 'HexAI Audio Enhancer') {
-        applyDetectedTrackInfo(msArtist ? `${msTitle} - ${msArtist}` : msTitle, activeStationRecord?.name);
-        return;
+        const display = msArtist && msArtist !== msTitle ? `${msTitle} — ${msArtist}` : msTitle;
+        syncEqVisualizerTrackDisplay(display);
       }
     }
 
-    // 2. Query Radio Browser station click/lastcheck/tags or ICY stream headers when CORS allows
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
-      const res = await fetch(streamUrl, {
-        method: 'GET',
-        headers: { 'Icy-MetaData': '1' },
-        signal: controller.signal
-      }).catch(() => null);
-      clearTimeout(timeoutId);
+    // Match station record by stream URL if not yet linked
+    if (!activeStationRecord && Array.isArray(window.__HEX_STATIONS_CACHE__)) {
+      const matched = window.__HEX_STATIONS_CACHE__.find(
+        s => s.url_resolved === activeSrc || s.url === activeSrc
+      );
+      if (matched) {
+        activeStationRecord = matched;
+        syncEqVisualizerTrackDisplay(
+          matched.name,
+          `${matched.country || 'Live'} • ${matched.bitrate || 128} kbps`,
+          matched.tags || 'radio'
+        );
+      }
+    }
 
-      if (res) {
-        const icyName = res.headers.get('icy-name');
-        const icyGenre = res.headers.get('icy-genre');
-        const icyBr = res.headers.get('icy-br');
-        if (icyGenre && activeStationRecord) {
-          activeStationRecord.tags = icyGenre;
+    // Fetch latest station metadata from Radio Browser API
+    try {
+      let stationData = null;
+      if (activeStationRecord?.stationuuid) {
+        const res = await fetch(`https://de1.api.radio-browser.info/json/stations/byuuid/${encodeURIComponent(activeStationRecord.stationuuid)}`);
+        if (res.ok) {
+          const arr = await res.json();
+          stationData = Array.isArray(arr) ? arr[0] : null;
         }
-        if (icyName && !activeStationRecord?.name) {
-          activeStationRecord = { ...(activeStationRecord || {}), name: icyName };
+      } else if (activeSrc.startsWith('https://')) {
+        const res = await fetch(`https://de1.api.radio-browser.info/json/stations/byurl?url=${encodeURIComponent(activeSrc)}`);
+        if (res.ok) {
+          const arr = await res.json();
+          stationData = Array.isArray(arr) ? arr[0] : null;
         }
+      }
+
+      if (stationData) {
+        activeStationRecord = { ...(activeStationRecord || {}), ...stationData };
         const subParts = [];
-        if (activeStationRecord?.country) subParts.push(activeStationRecord.country);
-        if (icyBr || activeStationRecord?.bitrate) subParts.push(`${icyBr || activeStationRecord.bitrate} kbps`);
-        if (icyGenre || activeStationRecord?.tags) subParts.push(icyGenre || activeStationRecord.tags);
-        if (subParts.length && document.getElementById('nowSub')) {
-          document.getElementById('nowSub').textContent = subParts.join(' • ');
-        }
+        if (stationData.country) subParts.push(stationData.country);
+        if (stationData.bitrate) subParts.push(`${stationData.bitrate} kbps`);
+        if (stationData.tags) subParts.push(stationData.tags);
+        syncEqVisualizerTrackDisplay(
+          stationData.name || currentTrackMeta.name,
+          subParts.join(' • '),
+          stationData.tags || currentTrackMeta.tags
+        );
       }
     } catch {
-      // Stream host does not expose ICY headers over CORS; continue silently
+      // Ignore network/CORS lookup errors
     }
 
-    // 3. Refresh station metadata from Radio Browser API if station UUID exists
-    if (activeStationRecord?.stationuuid) {
+    // Probe stream headers for ICY info when CORS headers are exposed
+    if (activeSrc.startsWith('https://')) {
       try {
-        const apiUrl = `https://de1.api.radio-browser.info/json/stations/byuuid/${encodeURIComponent(activeStationRecord.stationuuid)}`;
-        const apiRes = await fetch(apiUrl);
-        if (apiRes.ok) {
-          const list = await apiRes.json();
-          const fresh = Array.isArray(list) ? list[0] : null;
-          if (fresh) {
-            activeStationRecord = { ...activeStationRecord, ...fresh };
-            if (fresh.tags) {
-              currentTrackMeta.tags = fresh.tags;
-            }
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 3000);
+        const resp = await fetch(activeSrc, {
+          method: 'GET',
+          headers: { 'Icy-MetaData': '1' },
+          signal: ctrl.signal
+        }).catch(() => null);
+        clearTimeout(timer);
+
+        if (resp) {
+          const icyTitle = resp.headers.get('icy-title');
+          const icyName = resp.headers.get('icy-name');
+          const icyGenre = resp.headers.get('icy-genre');
+          const icyBr = resp.headers.get('icy-br');
+          const subParts = [];
+          if (activeStationRecord?.country) subParts.push(activeStationRecord.country);
+          if (icyBr || activeStationRecord?.bitrate) subParts.push(`${icyBr || activeStationRecord.bitrate} kbps`);
+          if (icyGenre || activeStationRecord?.tags) subParts.push(icyGenre || activeStationRecord.tags);
+
+          if (icyTitle) {
+            syncEqVisualizerTrackDisplay(icyTitle, subParts.join(' • '), icyGenre || activeStationRecord?.tags);
+          } else if (icyName && !activeStationRecord?.name) {
+            syncEqVisualizerTrackDisplay(icyName, subParts.join(' • '), icyGenre || activeStationRecord?.tags);
           }
         }
       } catch {
-        // Ignore transient lookup issues
+        // Stream host blocks cross-origin header reads
       }
     }
   }
 
-  function startRealtimeTrackAutoFetch() {
+  function startRealtimeAutoSyncLoop() {
     if (trackPollTimer) clearInterval(trackPollTimer);
-    fetchLiveStreamTrackMetadata(activeStationRecord || audioElement?.currentSrc || audioElement?.src);
+    autoDetectAndFetchLiveAudio();
     trackPollTimer = setInterval(() => {
       if (audioElement && !audioElement.paused) {
-        fetchLiveStreamTrackMetadata(activeStationRecord || audioElement.currentSrc || audioElement.src);
+        autoDetectAndFetchLiveAudio();
       }
-    }, 15000);
+    }, 12000);
   }
 
-  function attachEqVisualizerAutoSync() {
+  function bindEqAndVisualizerAutoListeners() {
     if (!audioElement) return;
 
-    const autoEngageDsp = () => {
+    const handleAudioActivity = () => {
       initAudioEnhancer();
-      if (audioCtx && audioCtx.state === 'suspended') {
+      if (audioCtx && audioCtx.state === 'suspended' && !audioElement.paused) {
         audioCtx.resume().catch(() => {});
       }
-      if (analyser && !visualizerRafId) {
-        startVisualizer();
-      }
-      startRealtimeTrackAutoFetch();
+      startVisualizer();
+      startRealtimeAutoSyncLoop();
     };
 
-    ['play', 'playing', 'canplay', 'loadedmetadata', 'volumechange'].forEach(evtName => {
-      audioElement.addEventListener(evtName, autoEngageDsp);
+    ['play', 'playing', 'canplay', 'loadedmetadata', 'emptied'].forEach(evt => {
+      audioElement.addEventListener(evt, handleAudioActivity);
     });
 
-    // Observe #nowTitle or #nowSub changes from external/UI actions so currentTrackMeta stays in sync
     const titleEl = document.getElementById('nowTitle');
     if (titleEl && typeof MutationObserver !== 'undefined') {
       const observer = new MutationObserver(() => {
-        const t = (titleEl.textContent || '').trim();
-        if (t && t !== 'Not Playing' && t !== lastDetectedTrackTitle) {
-          currentTrackMeta.name = t;
-          if (activeStationRecord && !activeStationRecord.name) {
-            activeStationRecord.name = t;
-          }
+        const txt = (titleEl.textContent || '').trim();
+        if (txt && txt !== 'Not Playing') {
+          currentTrackMeta.name = txt;
         }
       });
       observer.observe(titleEl, { childList: true, characterData: true, subtree: true });
@@ -4567,10 +4638,10 @@ if (document.addEventListener) {
   // ==========================================
   async function playStream(url, title = 'Custom Stream', subtitle = 'Live Audio', tags = 'music', stationObj = null) {
     activeStationRecord = stationObj || { name: title, tags, url_resolved: url };
-    lastDetectedTrackTitle = '';
+    lastAppliedTrack = '';
 
     initAudioEnhancer();
-    if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume();
+    if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume().catch(() => {});
 
     currentTrackMeta = { name: title, tags };
     const nowTitle = document.getElementById('nowTitle');
@@ -4590,10 +4661,12 @@ if (document.addEventListener) {
       corsBadge.className = 'badge-pill';
     }
 
-    startRealtimeTrackAutoFetch();
+    startVisualizer();
+    startRealtimeAutoSyncLoop();
 
     try {
       await audioElement.play();
+      if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume().catch(() => {});
     } catch (err) {
       console.warn('CORS blocked by stream host, switching to direct playback:', err);
       audioElement.removeAttribute('crossorigin');
@@ -4602,7 +4675,9 @@ if (document.addEventListener) {
         corsBadge.innerHTML = '<i class="fa-solid fa-circle-exclamation"></i> Direct Stream (No CORS)';
         corsBadge.className = 'badge-pill warn';
       }
-      audioElement.play().catch(() => {
+      audioElement.play().then(() => {
+        startVisualizer();
+      }).catch(() => {
         if (nowSub) nowSub.textContent = 'Stream offline or blocked by browser';
       });
     }
@@ -4610,7 +4685,7 @@ if (document.addEventListener) {
 
   if (audioElement) {
     audioElement.addEventListener('play', () => {
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
       const disc = document.getElementById('discIcon');
       if (disc) disc.style.animationPlayState = 'running';
       if ('mediaSession' in navigator && typeof MediaMetadata !== 'undefined') {
@@ -4620,7 +4695,8 @@ if (document.addEventListener) {
           album: 'Browser(x) Live DSP'
         });
       }
-      startRealtimeTrackAutoFetch();
+      startVisualizer();
+      startRealtimeAutoSyncLoop();
     });
 
     audioElement.addEventListener('pause', () => {
@@ -4692,6 +4768,7 @@ if (document.addEventListener) {
       console.warn('Using curated CORS-ready stations:', e);
     }
 
+    window.__HEX_STATIONS_CACHE__ = stations;
     if (countBadge) countBadge.innerHTML = `<i class="fa-solid fa-signal"></i> ${stations.length} Stations`;
     grid.innerHTML = '';
 
@@ -4797,7 +4874,7 @@ if (document.addEventListener) {
 
       const preset = JSON.parse(jsonMatch[0]);
       initAudioEnhancer();
-      if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume();
+      if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume().catch(() => {});
 
       if (sliderBass) sliderBass.value = Math.max(-6, Math.min(15, Number(preset.bass) || 6));
       if (sliderTreble) sliderTreble.value = Math.max(-6, Math.min(15, Number(preset.treble) || 4));
@@ -4819,7 +4896,7 @@ if (document.addEventListener) {
       }
     } catch (err) {
       initAudioEnhancer();
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
       if (sliderBass) sliderBass.value = 7;
       if (sliderTreble) sliderTreble.value = 5;
       if (sliderStereo) sliderStereo.value = 150;
@@ -4894,8 +4971,15 @@ if (document.addEventListener) {
     });
   }
 
-  // Boot EQ/Visualizer auto-sync and initial station directory
-  attachEqVisualizerAutoSync();
+  window.__HEX_AI_RADIO_PLUGIN_ACTIVE__ = {
+    destroy() {
+      if (visualizerRafId) cancelAnimationFrame(visualizerRafId);
+      if (trackPollTimer) clearInterval(trackPollTimer);
+    }
+  };
+
+  // Boot EQ/Visualizer auto-sync and station directory
+  bindEqAndVisualizerAutoListeners();
   fetchRadioStations();
 })();
 </script>
