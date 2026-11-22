@@ -4077,5 +4077,827 @@ if (document.addEventListener) {
 
 })(window);
 </script>
+  <script>
+(() => {
+  'use strict';
+
+  if (window.__HEX_AI_RADIO_PLUGIN_LOADED__) return;
+  window.__HEX_AI_RADIO_PLUGIN_LOADED__ = true;
+
+  // ==========================================
+  // 1. DOLBY ATMOS (E-AC-3 JOC & AC-4) MEDIA CAPABILITIES CHECK
+  // ==========================================
+  async function probeAudioDecoding(configs) {
+    if (!('mediaCapabilities' in navigator) || typeof navigator.mediaCapabilities.decodingInfo !== 'function') {
+      return { supported: false, spatialRendering: false, powerEfficient: false };
+    }
+    for (const cfg of configs) {
+      try {
+        const res = await navigator.mediaCapabilities.decodingInfo(cfg);
+        if (res && res.supported) {
+          return {
+            supported: true,
+            spatialRendering: Boolean(res.spatialRendering),
+            powerEfficient: Boolean(res.powerEfficient)
+          };
+        }
+      } catch {
+        // Continue probing next valid MIME / channel / type variant
+      }
+    }
+    return { supported: false, spatialRendering: false, powerEfficient: false };
+  }
+
+  async function checkDolbyAtmosSupport() {
+    const ddPlusConfigs = [
+      {
+        type: 'media-source',
+        audio: { contentType: 'audio/mp4; codecs="ec-3"', channels: '16', spatialRendering: true }
+      },
+      {
+        type: 'media-source',
+        audio: { contentType: 'audio/mp4; codecs="ec-3"', channels: '6', spatialRendering: true }
+      },
+      {
+        type: 'file',
+        audio: { contentType: 'audio/mp4; codecs="ec-3"', channels: '6' }
+      },
+      {
+        type: 'media-source',
+        audio: { contentType: 'audio/mp4; codecs="ec-3"' }
+      }
+    ];
+
+    const ac4Configs = [
+      {
+        type: 'media-source',
+        audio: { contentType: 'audio/mp4; codecs="ac-4.02.01.04"', channels: '16', spatialRendering: true }
+      },
+      {
+        type: 'media-source',
+        audio: { contentType: 'audio/mp4; codecs="ac-4.02.01.01"', spatialRendering: true }
+      },
+      {
+        type: 'media-source',
+        audio: { contentType: 'audio/mp4; codecs="ac-4"' }
+      },
+      {
+        type: 'file',
+        audio: { contentType: 'audio/mp4; codecs="ac-4"' }
+      }
+    ];
+
+    const [ddPlus, ac4] = await Promise.all([
+      probeAudioDecoding(ddPlusConfigs),
+      probeAudioDecoding(ac4Configs)
+    ]);
+
+    const audioTester = document.createElement('audio');
+    const msCheck = (mime) =>
+      (typeof MediaSource !== 'undefined' && typeof MediaSource.isTypeSupported === 'function' && MediaSource.isTypeSupported(mime)) ||
+      audioTester.canPlayType(mime) !== '';
+
+    const ddPlusFallback = msCheck('audio/mp4; codecs="ec-3"');
+    const ac4Fallback = msCheck('audio/mp4; codecs="ac-4"') || msCheck('audio/mp4; codecs="ac-4.02.01.04"');
+
+    return {
+      ddPlusAtmos: ddPlus.supported || ddPlusFallback,
+      ddPlusSpatial: ddPlus.spatialRendering,
+      ac4Atmos: ac4.supported || ac4Fallback,
+      ac4Spatial: ac4.spatialRendering
+    };
+  }
+
+  checkDolbyAtmosSupport().then(support => {
+    const badge = document.getElementById('atmosBadge');
+    const caps = document.getElementById('codecCaps');
+    const hasNativeAtmos = support.ddPlusAtmos || support.ac4Atmos;
+    const hasSpatialFlag = support.ddPlusSpatial || support.ac4Spatial;
+
+    if (badge) {
+      if (hasNativeAtmos) {
+        badge.innerHTML = `<i class="fa-solid fa-circle-check"></i> ${hasSpatialFlag ? 'Dolby Atmos Spatial Ready' : 'Dolby Digital+ / AC-4 Ready'}`;
+        badge.className = 'badge-pill';
+      } else {
+        badge.innerHTML = '<i class="fa-solid fa-headphones"></i> Virtual Binaural Atmos DSP';
+        badge.className = 'badge-pill warn';
+      }
+    }
+
+    if (caps) {
+      const audioTester = document.createElement('audio');
+      const formats = [
+        { label: 'Opus', ok: (typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported && MediaSource.isTypeSupported('audio/webm; codecs="opus"')) || audioTester.canPlayType('audio/ogg; codecs="opus"') !== '' },
+        { label: 'FLAC', ok: audioTester.canPlayType('audio/flac') !== '' },
+        { label: 'AAC/M4A', ok: audioTester.canPlayType('audio/mp4') !== '' },
+        { label: 'E-AC-3 Atmos', ok: support.ddPlusAtmos },
+        { label: 'AC-4', ok: support.ac4Atmos }
+      ];
+      caps.innerHTML = formats.map(f =>
+        `<span class="badge-pill ${f.ok ? '' : 'warn'}" title="${f.ok ? 'Hardware/OS Decoder Available' : 'Handled via Client-Side Spatial DSP'}"><i class="fa-solid ${f.ok ? 'fa-check' : 'fa-wave-square'}"></i> ${f.label}</span>`
+      ).join('');
+    }
+  });
+
+  // ==========================================
+  // 2. REAL-TIME WEB AUDIO API DSP GRAPH (WITH BINAURAL ATMOS SPATIALIZER)
+  // ==========================================
+  const audioElement = document.getElementById('audioPlayer');
+  const toggleBtn = document.getElementById('toggleEnhance');
+  const corsBadge = document.getElementById('corsStatusBadge');
+
+  let audioCtx = null;
+  let sourceNode = null;
+  let bassFilter = null;
+  let trebleFilter = null;
+  let compressor = null;
+  let stereoPanner = null;
+  let spatialSplitter = null;
+  let spatialMerger = null;
+  let spatialDelayL = null;
+  let spatialDelayR = null;
+  let spatialWetGain = null;
+  let spatialDryGain = null;
+  let analyser = null;
+  let isEnhanced = false;
+  let dspConnected = false;
+  let visualizerRafId = null;
+
+  const sliderBass = document.getElementById('sliderBass');
+  const sliderTreble = document.getElementById('sliderTreble');
+  const sliderStereo = document.getElementById('sliderStereo');
+  const sliderComp = document.getElementById('sliderComp');
+
+  function initAudioEnhancer() {
+    if (audioCtx || !audioElement) return;
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      audioCtx = new AudioContextClass({ sampleRate: 48000 });
+      sourceNode = audioCtx.createMediaElementSource(audioElement);
+
+      // 1. Bass Boost (Low-shelf filter)
+      bassFilter = audioCtx.createBiquadFilter();
+      bassFilter.type = 'lowshelf';
+      bassFilter.frequency.value = 150;
+      bassFilter.gain.value = 0;
+
+      // 2. Vocal / Treble Clarity (High-shelf filter)
+      trebleFilter = audioCtx.createBiquadFilter();
+      trebleFilter.type = 'highshelf';
+      trebleFilter.frequency.value = 3500;
+      trebleFilter.gain.value = 0;
+
+      // 3. True Stereo / Virtual Atmos Haas Spatial Widener + Panner
+      stereoPanner = audioCtx.createStereoPanner();
+      stereoPanner.pan.value = 0;
+
+      spatialDryGain = audioCtx.createGain();
+      spatialDryGain.gain.value = 1.0;
+
+      spatialWetGain = audioCtx.createGain();
+      spatialWetGain.gain.value = 0.0;
+
+      spatialSplitter = audioCtx.createChannelSplitter(2);
+      spatialMerger = audioCtx.createChannelMerger(2);
+
+      spatialDelayL = audioCtx.createDelay(0.05);
+      spatialDelayL.delayTime.value = 0.007;
+      spatialDelayR = audioCtx.createDelay(0.05);
+      spatialDelayR.delayTime.value = 0.013;
+
+      // 4. Dynamic Range Compressor
+      compressor = audioCtx.createDynamicsCompressor();
+      compressor.threshold.value = -24;
+      compressor.knee.value = 30;
+      compressor.ratio.value = 12;
+      compressor.attack.value = 0.003;
+      compressor.release.value = 0.25;
+
+      // 5. Real-Time Spectrum Analyser
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 128;
+
+      sourceNode.connect(bassFilter).connect(trebleFilter);
+
+      // Dry path
+      trebleFilter.connect(spatialDryGain).connect(stereoPanner);
+
+      // Wet cross-delayed Atmos widening path
+      trebleFilter.connect(spatialSplitter);
+      spatialSplitter.connect(spatialDelayR, 0);
+      spatialSplitter.connect(spatialDelayL, 1);
+      spatialDelayL.connect(spatialMerger, 0, 0);
+      spatialDelayR.connect(spatialMerger, 0, 1);
+      spatialMerger.connect(spatialWetGain).connect(stereoPanner);
+
+      stereoPanner
+        .connect(compressor)
+        .connect(analyser)
+        .connect(audioCtx.destination);
+
+      dspConnected = true;
+      startVisualizer();
+    } catch (err) {
+      console.warn('Web Audio DSP fallback:', err);
+      if (corsBadge) {
+        corsBadge.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Direct Stream Mode';
+        corsBadge.className = 'badge-pill warn';
+      }
+    }
+  }
+
+  function updateDspValues() {
+    const b = sliderBass ? parseFloat(sliderBass.value) : 0;
+    const t = sliderTreble ? parseFloat(sliderTreble.value) : 0;
+    const s = sliderStereo ? parseFloat(sliderStereo.value) : 100;
+    const c = sliderComp ? parseFloat(sliderComp.value) : 0;
+
+    const valBass = document.getElementById('valBass');
+    const valTreble = document.getElementById('valTreble');
+    const valStereo = document.getElementById('valStereo');
+    const valComp = document.getElementById('valComp');
+
+    if (valBass) valBass.textContent = `${b >= 0 ? '+' : ''}${b} dB`;
+    if (valTreble) valTreble.textContent = `${t >= 0 ? '+' : ''}${t} dB`;
+    if (valStereo) valStereo.textContent = `${s}%`;
+    if (valComp) valComp.textContent = `${c} dB`;
+
+    if (!dspConnected || !audioCtx) return;
+    const now = audioCtx.currentTime;
+    bassFilter.gain.setTargetAtTime(b, now, 0.02);
+    trebleFilter.gain.setTargetAtTime(t, now, 0.02);
+    compressor.threshold.setTargetAtTime(c, now, 0.02);
+
+    const widthRatio = Math.max(0, (s - 100) / 100);
+    spatialWetGain.gain.setTargetAtTime(widthRatio * 0.35, now, 0.03);
+    spatialDryGain.gain.setTargetAtTime(s === 0 ? 0.5 : 1.0 - widthRatio * 0.12, now, 0.03);
+    stereoPanner.pan.setTargetAtTime(0, now, 0.03);
+  }
+
+  [sliderBass, sliderTreble, sliderStereo, sliderComp].forEach(el => {
+    if (!el) return;
+    el.addEventListener('input', () => {
+      initAudioEnhancer();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      isEnhanced = true;
+      if (toggleBtn) {
+        toggleBtn.className = 'btn active-enhance';
+        toggleBtn.innerHTML = '<i class="fa-solid fa-bolt"></i> Enhancer Active';
+      }
+      updateDspValues();
+    });
+  });
+
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', () => {
+      initAudioEnhancer();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
+      isEnhanced = !isEnhanced;
+      if (isEnhanced) {
+        if (sliderBass) sliderBass.value = 6;
+        if (sliderTreble) sliderTreble.value = 4;
+        if (sliderStereo) sliderStereo.value = 140;
+        if (sliderComp) sliderComp.value = -24;
+        toggleBtn.className = 'btn active-enhance';
+        toggleBtn.innerHTML = '<i class="fa-solid fa-bolt"></i> Enhancer Active';
+      } else {
+        if (sliderBass) sliderBass.value = 0;
+        if (sliderTreble) sliderTreble.value = 0;
+        if (sliderStereo) sliderStereo.value = 100;
+        if (sliderComp) sliderComp.value = 0;
+        toggleBtn.className = 'btn primary';
+        toggleBtn.innerHTML = '<i class="fa-solid fa-bolt"></i> Enable Enhancer';
+      }
+      updateDspValues();
+    });
+  }
+
+  // ==========================================
+  // 3. SPECTRUM VISUALIZER
+  // ==========================================
+  function startVisualizer() {
+    if (!analyser) return;
+    if (visualizerRafId) cancelAnimationFrame(visualizerRafId);
+    const canvas = document.getElementById('visualizer');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+
+    function draw() {
+      visualizerRafId = requestAnimationFrame(draw);
+      const dpr = window.devicePixelRatio || 1;
+      const targetW = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      const targetH = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      analyser.getByteFrequencyData(dataArray);
+      const barWidth = (canvas.width / bufferLength) * 1.4;
+      let x = 0;
+
+      for (let i = 0; i < bufferLength; i++) {
+        const barHeight = (dataArray[i] / 255) * canvas.height * 0.9;
+        const grad = ctx.createLinearGradient(0, canvas.height, 0, 0);
+        grad.addColorStop(0, '#4facfe');
+        grad.addColorStop(1, '#00f2fe');
+        ctx.fillStyle = grad;
+        ctx.fillRect(x, canvas.height - barHeight, Math.max(1, barWidth - 2), barHeight);
+        x += barWidth;
+      }
+    }
+    draw();
+  }
+
+  // ==========================================
+  // 4. REAL-TIME AUTO-DETECT & FETCH FOR EQ & VISUALIZER
+  // ==========================================
+  let currentTrackMeta = { name: 'Live Stream', tags: 'radio, music' };
+  let activeStationRecord = null;
+  let trackPollTimer = null;
+  let lastDetectedTrackTitle = '';
+
+  function applyDetectedTrackInfo(trackTitle, stationName, extraSub = '') {
+    const cleanTrack = (trackTitle || '').trim();
+    const baseStation = (stationName || activeStationRecord?.name || document.getElementById('nowTitle')?.textContent || 'Live Stream').trim();
+    const nowTitleEl = document.getElementById('nowTitle');
+    const nowSubEl = document.getElementById('nowSub');
+
+    if (cleanTrack && cleanTrack !== baseStation && cleanTrack !== lastDetectedTrackTitle) {
+      lastDetectedTrackTitle = cleanTrack;
+      currentTrackMeta = {
+        name: `${cleanTrack} — ${baseStation}`,
+        tags: activeStationRecord?.tags || currentTrackMeta.tags || 'live radio, music'
+      };
+      if (nowTitleEl) nowTitleEl.textContent = cleanTrack;
+      if (nowSubEl) {
+        const tagsPart = activeStationRecord?.tags ? ` • ${activeStationRecord.tags}` : '';
+        nowSubEl.textContent = extraSub || `${baseStation}${tagsPart}`;
+      }
+      if ('mediaSession' in navigator && typeof MediaMetadata !== 'undefined') {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: cleanTrack,
+          artist: baseStation,
+          album: 'HexAIRadio-BROWSER Live EQ'
+        });
+      }
+    }
+  }
+
+  async function fetchLiveStreamTrackMetadata(stationOrUrl) {
+    const streamUrl = typeof stationOrUrl === 'string'
+      ? stationOrUrl
+      : (stationOrUrl?.url_resolved || stationOrUrl?.url || audioElement?.currentSrc || audioElement?.src || '');
+    if (!streamUrl || !streamUrl.startsWith('https://')) return;
+
+    // 1. Check browser MediaSession / audio element metadata first
+    if ('mediaSession' in navigator && navigator.mediaSession.metadata?.title) {
+      const msTitle = navigator.mediaSession.metadata.title;
+      const msArtist = navigator.mediaSession.metadata.artist;
+      if (msTitle && msTitle !== 'HexAI Audio Enhancer') {
+        applyDetectedTrackInfo(msArtist ? `${msTitle} - ${msArtist}` : msTitle, activeStationRecord?.name);
+        return;
+      }
+    }
+
+    // 2. Query Radio Browser station click/lastcheck/tags or ICY stream headers when CORS allows
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch(streamUrl, {
+        method: 'GET',
+        headers: { 'Icy-MetaData': '1' },
+        signal: controller.signal
+      }).catch(() => null);
+      clearTimeout(timeoutId);
+
+      if (res) {
+        const icyName = res.headers.get('icy-name');
+        const icyGenre = res.headers.get('icy-genre');
+        const icyBr = res.headers.get('icy-br');
+        if (icyGenre && activeStationRecord) {
+          activeStationRecord.tags = icyGenre;
+        }
+        if (icyName && !activeStationRecord?.name) {
+          activeStationRecord = { ...(activeStationRecord || {}), name: icyName };
+        }
+        const subParts = [];
+        if (activeStationRecord?.country) subParts.push(activeStationRecord.country);
+        if (icyBr || activeStationRecord?.bitrate) subParts.push(`${icyBr || activeStationRecord.bitrate} kbps`);
+        if (icyGenre || activeStationRecord?.tags) subParts.push(icyGenre || activeStationRecord.tags);
+        if (subParts.length && document.getElementById('nowSub')) {
+          document.getElementById('nowSub').textContent = subParts.join(' • ');
+        }
+      }
+    } catch {
+      // Stream host does not expose ICY headers over CORS; continue silently
+    }
+
+    // 3. Refresh station metadata from Radio Browser API if station UUID exists
+    if (activeStationRecord?.stationuuid) {
+      try {
+        const apiUrl = `https://de1.api.radio-browser.info/json/stations/byuuid/${encodeURIComponent(activeStationRecord.stationuuid)}`;
+        const apiRes = await fetch(apiUrl);
+        if (apiRes.ok) {
+          const list = await apiRes.json();
+          const fresh = Array.isArray(list) ? list[0] : null;
+          if (fresh) {
+            activeStationRecord = { ...activeStationRecord, ...fresh };
+            if (fresh.tags) {
+              currentTrackMeta.tags = fresh.tags;
+            }
+          }
+        }
+      } catch {
+        // Ignore transient lookup issues
+      }
+    }
+  }
+
+  function startRealtimeTrackAutoFetch() {
+    if (trackPollTimer) clearInterval(trackPollTimer);
+    fetchLiveStreamTrackMetadata(activeStationRecord || audioElement?.currentSrc || audioElement?.src);
+    trackPollTimer = setInterval(() => {
+      if (audioElement && !audioElement.paused) {
+        fetchLiveStreamTrackMetadata(activeStationRecord || audioElement.currentSrc || audioElement.src);
+      }
+    }, 15000);
+  }
+
+  function attachEqVisualizerAutoSync() {
+    if (!audioElement) return;
+
+    const autoEngageDsp = () => {
+      initAudioEnhancer();
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(() => {});
+      }
+      if (analyser && !visualizerRafId) {
+        startVisualizer();
+      }
+      startRealtimeTrackAutoFetch();
+    };
+
+    ['play', 'playing', 'canplay', 'loadedmetadata', 'volumechange'].forEach(evtName => {
+      audioElement.addEventListener(evtName, autoEngageDsp);
+    });
+
+    // Observe #nowTitle or #nowSub changes from external/UI actions so currentTrackMeta stays in sync
+    const titleEl = document.getElementById('nowTitle');
+    if (titleEl && typeof MutationObserver !== 'undefined') {
+      const observer = new MutationObserver(() => {
+        const t = (titleEl.textContent || '').trim();
+        if (t && t !== 'Not Playing' && t !== lastDetectedTrackTitle) {
+          currentTrackMeta.name = t;
+          if (activeStationRecord && !activeStationRecord.name) {
+            activeStationRecord.name = t;
+          }
+        }
+      });
+      observer.observe(titleEl, { childList: true, characterData: true, subtree: true });
+    }
+  }
+
+  // ==========================================
+  // 5. STREAM LOADER WITH CORS AUTO-FALLBACK
+  // ==========================================
+  async function playStream(url, title = 'Custom Stream', subtitle = 'Live Audio', tags = 'music', stationObj = null) {
+    activeStationRecord = stationObj || { name: title, tags, url_resolved: url };
+    lastDetectedTrackTitle = '';
+
+    initAudioEnhancer();
+    if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume();
+
+    currentTrackMeta = { name: title, tags };
+    const nowTitle = document.getElementById('nowTitle');
+    const nowSub = document.getElementById('nowSub');
+    const omnibox = document.getElementById('omniboxUrl');
+
+    if (nowTitle) nowTitle.textContent = title;
+    if (nowSub) nowSub.textContent = subtitle;
+    if (omnibox) omnibox.value = url;
+
+    if (!audioElement) return;
+    audioElement.pause();
+    audioElement.crossOrigin = 'anonymous';
+    audioElement.src = url;
+    if (corsBadge) {
+      corsBadge.innerHTML = '<i class="fa-solid fa-wave-square"></i> DSP Hooked (CORS OK)';
+      corsBadge.className = 'badge-pill';
+    }
+
+    startRealtimeTrackAutoFetch();
+
+    try {
+      await audioElement.play();
+    } catch (err) {
+      console.warn('CORS blocked by stream host, switching to direct playback:', err);
+      audioElement.removeAttribute('crossorigin');
+      audioElement.src = url;
+      if (corsBadge) {
+        corsBadge.innerHTML = '<i class="fa-solid fa-circle-exclamation"></i> Direct Stream (No CORS)';
+        corsBadge.className = 'badge-pill warn';
+      }
+      audioElement.play().catch(() => {
+        if (nowSub) nowSub.textContent = 'Stream offline or blocked by browser';
+      });
+    }
+  }
+
+  if (audioElement) {
+    audioElement.addEventListener('play', () => {
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      const disc = document.getElementById('discIcon');
+      if (disc) disc.style.animationPlayState = 'running';
+      if ('mediaSession' in navigator && typeof MediaMetadata !== 'undefined') {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: document.getElementById('nowTitle')?.textContent || currentTrackMeta.name,
+          artist: activeStationRecord?.name || 'HexAI Audio Enhancer',
+          album: 'Browser(x) Live DSP'
+        });
+      }
+      startRealtimeTrackAutoFetch();
+    });
+
+    audioElement.addEventListener('pause', () => {
+      const disc = document.getElementById('discIcon');
+      if (disc) disc.style.animationPlayState = 'paused';
+    });
+  }
+
+  const btnLoadDirectUrl = document.getElementById('btnLoadDirectUrl');
+  const omniboxUrl = document.getElementById('omniboxUrl');
+  if (btnLoadDirectUrl && omniboxUrl) {
+    btnLoadDirectUrl.addEventListener('click', () => {
+      const url = omniboxUrl.value.trim();
+      if (url.startsWith('http://') || url.startsWith('https://')) {
+        playStream(url, 'Direct Network Stream', url, 'custom stream', { name: 'Direct Network Stream', tags: 'custom stream', url_resolved: url });
+      }
+    });
+
+    omniboxUrl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        btnLoadDirectUrl.click();
+      }
+    });
+  }
+
+  // ==========================================
+  // 6. FREE RADIO BROWSER API (NO API KEY)
+  // ==========================================
+  const CURATED_CORS_STATIONS = [
+    { name: 'SomaFM Groove Salad (Ambient/Chill)', url_resolved: 'https://ice1.somafm.com/groovesalad-128-mp3', tags: 'ambient, chill, electronic', country: 'US', bitrate: 128 },
+    { name: 'SomaFM DEF CON Radio (Synth/Cyber)', url_resolved: 'https://ice1.somafm.com/defcon-128-mp3', tags: 'electronic, synthwave, hacker', country: 'US', bitrate: 128 },
+    { name: 'SomaFM Lush (Vocals/Downtempo)', url_resolved: 'https://ice1.somafm.com/lush-128-mp3', tags: 'vocal, chillout, lounge', country: 'US', bitrate: 128 },
+    { name: 'SomaFM Drone Zone (Deep Space)', url_resolved: 'https://ice1.somafm.com/dronezone-128-mp3', tags: 'ambient, space, atmospheric', country: 'US', bitrate: 128 },
+    { name: 'Radio Paradise Main Mix (FLAC/AAC)', url_resolved: 'https://stream.radioparadise.com/aac-320', tags: 'eclectic, rock, indie, lossless', country: 'US', bitrate: 320 },
+    { name: 'Nightride FM (Synthwave / Retrowave)', url_resolved: 'https://stream.nightride.fm/nightride.m4a', tags: 'synthwave, outrun, electronic', country: 'US', bitrate: 192 }
+  ];
+
+  async function fetchRadioStations(query = '', tag = '') {
+    const grid = document.getElementById('stationGrid');
+    const countBadge = document.getElementById('stationCountBadge');
+    if (!grid) return;
+
+    grid.innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:0.85rem;"><i class="fa-solid fa-spinner fa-spin"></i> Fetching live stations...</div>';
+
+    let stations = [...CURATED_CORS_STATIONS];
+    try {
+      const endpoint = new URL('https://de1.api.radio-browser.info/json/stations/search');
+      endpoint.searchParams.set('limit', '24');
+      endpoint.searchParams.set('hidebroken', 'true');
+      endpoint.searchParams.set('order', 'votes');
+      endpoint.searchParams.set('reverse', 'true');
+      if (query) endpoint.searchParams.set('name', query);
+      if (tag) endpoint.searchParams.set('tag', tag);
+
+      const res = await fetch(endpoint.toString());
+      if (res.ok) {
+        const data = await res.json();
+        const filtered = data.filter(s => s.url_resolved && s.url_resolved.startsWith('https://'));
+        if (query || tag) {
+          stations = filtered.length ? filtered : CURATED_CORS_STATIONS.filter(s =>
+            s.name.toLowerCase().includes(query.toLowerCase()) ||
+            s.tags.toLowerCase().includes((tag || query).toLowerCase())
+          );
+        } else {
+          stations = [...CURATED_CORS_STATIONS, ...filtered];
+        }
+      }
+    } catch (e) {
+      console.warn('Using curated CORS-ready stations:', e);
+    }
+
+    if (countBadge) countBadge.innerHTML = `<i class="fa-solid fa-signal"></i> ${stations.length} Stations`;
+    grid.innerHTML = '';
+
+    if (!stations.length) {
+      grid.innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:0.85rem;"><i class="fa-solid fa-circle-info"></i> No stations matched your filter. Try another keyword.</div>';
+      return;
+    }
+
+    stations.forEach(st => {
+      const card = document.createElement('div');
+      card.className = 'station-card';
+
+      const iconWrap = document.createElement('div');
+      iconWrap.className = 'station-icon';
+      if (st.favicon && st.favicon.startsWith('https://')) {
+        const img = document.createElement('img');
+        img.src = st.favicon;
+        img.alt = '';
+        img.onerror = () => {
+          iconWrap.innerHTML = '<i class="fa-solid fa-tower-broadcast"></i>';
+        };
+        iconWrap.appendChild(img);
+      } else {
+        iconWrap.innerHTML = '<i class="fa-solid fa-tower-broadcast"></i>';
+      }
+
+      const infoWrap = document.createElement('div');
+      infoWrap.className = 'station-info';
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'station-name';
+      nameEl.textContent = st.name;
+
+      const tagsEl = document.createElement('div');
+      tagsEl.className = 'station-tags';
+      tagsEl.textContent = `${st.country || 'Global'} • ${st.bitrate || 128}kbps • ${st.tags || 'Radio'}`;
+
+      infoWrap.appendChild(nameEl);
+      infoWrap.appendChild(tagsEl);
+      card.appendChild(iconWrap);
+      card.appendChild(infoWrap);
+
+      card.addEventListener('click', () => {
+        document.querySelectorAll('.station-card').forEach(c => c.classList.remove('playing'));
+        card.classList.add('playing');
+        playStream(
+          st.url_resolved,
+          st.name,
+          `${st.country || 'Live'} • ${st.bitrate || 128} kbps`,
+          st.tags || 'radio',
+          st
+        );
+      });
+      grid.appendChild(card);
+    });
+  }
+
+  const btnSearchRadio = document.getElementById('btnSearchRadio');
+  const radioSearch = document.getElementById('radioSearch');
+  const genreSelect = document.getElementById('genreSelect');
+  const btnBack = document.getElementById('btnBack');
+
+  if (btnSearchRadio && radioSearch && genreSelect) {
+    btnSearchRadio.addEventListener('click', () => {
+      fetchRadioStations(radioSearch.value.trim(), genreSelect.value);
+    });
+    radioSearch.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        fetchRadioStations(radioSearch.value.trim(), genreSelect.value);
+      }
+    });
+    genreSelect.addEventListener('change', () => {
+      fetchRadioStations(radioSearch.value.trim(), genreSelect.value);
+    });
+  }
+
+  if (btnBack) {
+    btnBack.addEventListener('click', () => {
+      if (radioSearch) radioSearch.value = '';
+      if (genreSelect) genreSelect.value = '';
+      fetchRadioStations();
+    });
+  }
+
+  // ==========================================
+  // 7. FREE KEYLESS AI ACOUSTIC TUNER (POLLINATIONS AI)
+  // ==========================================
+  async function runKeylessAiDsp(promptText) {
+    const insightBox = document.getElementById('aiInsightBox');
+    const aiLog = document.getElementById('aiConsoleLog');
+    if (insightBox) {
+      insightBox.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Querying keyless AI acoustic model...';
+    }
+
+    const systemPrompt = `You are a mastering audio engineer. Return ONLY valid JSON with keys: bass (-6 to 15), treble (-6 to 15), stereo (0 to 200), comp (-45 to 0), summary (max 18 words). User context: ${promptText}`;
+
+    try {
+      const url = `https://text.pollinations.ai/${encodeURIComponent(systemPrompt)}?model=openai`;
+      const res = await fetch(url);
+      const raw = await res.text();
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('Invalid AI JSON');
+
+      const preset = JSON.parse(jsonMatch[0]);
+      initAudioEnhancer();
+      if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume();
+
+      if (sliderBass) sliderBass.value = Math.max(-6, Math.min(15, Number(preset.bass) || 6));
+      if (sliderTreble) sliderTreble.value = Math.max(-6, Math.min(15, Number(preset.treble) || 4));
+      if (sliderStereo) sliderStereo.value = Math.max(0, Math.min(200, Number(preset.stereo) || 140));
+      if (sliderComp) sliderComp.value = Math.max(-45, Math.min(0, Number(preset.comp) || -24));
+
+      isEnhanced = true;
+      if (toggleBtn) {
+        toggleBtn.className = 'btn active-enhance';
+        toggleBtn.innerHTML = '<i class="fa-solid fa-bolt"></i> AI DSP Active';
+      }
+      updateDspValues();
+
+      if (insightBox) {
+        insightBox.innerHTML = `<strong><i class="fa-solid fa-wand-magic-sparkles"></i> AI Applied:</strong> ${preset.summary || 'Custom EQ & compressor applied.'}`;
+      }
+      if (aiLog) {
+        aiLog.textContent = `Applied Preset -> Bass: ${sliderBass?.value ?? 6}dB | Treble: ${sliderTreble?.value ?? 4}dB | Stereo: ${sliderStereo?.value ?? 140}% | Comp: ${sliderComp?.value ?? -24}dB`;
+      }
+    } catch (err) {
+      initAudioEnhancer();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      if (sliderBass) sliderBass.value = 7;
+      if (sliderTreble) sliderTreble.value = 5;
+      if (sliderStereo) sliderStereo.value = 150;
+      if (sliderComp) sliderComp.value = -26;
+      isEnhanced = true;
+      if (toggleBtn) {
+        toggleBtn.className = 'btn active-enhance';
+        toggleBtn.innerHTML = '<i class="fa-solid fa-bolt"></i> AI DSP Active';
+      }
+      updateDspValues();
+      if (insightBox) {
+        insightBox.innerHTML = `<strong><i class="fa-solid fa-microchip"></i> Studio Harmonic Curve:</strong> Applied +7dB Sub-Bass, +5dB Air Clarity &amp; 150% Spatial Width.`;
+      }
+      if (aiLog) {
+        aiLog.textContent = `Fallback Studio Curve -> Bass: +7dB | Treble: +5dB | Stereo: 150% | Comp: -26dB`;
+      }
+    }
+  }
+
+  const btnAiAutoTune = document.getElementById('btnAiAutoTune');
+  const btnRunAiPreset = document.getElementById('btnRunAiPreset');
+  const aiPromptInput = document.getElementById('aiPromptInput');
+
+  if (btnAiAutoTune) {
+    btnAiAutoTune.addEventListener('click', () => {
+      const liveTitle = document.getElementById('nowTitle')?.textContent?.trim() || currentTrackMeta.name;
+      runKeylessAiDsp(`Optimize EQ and compression for track/station: "${liveTitle}" with genre tags: "${currentTrackMeta.tags}"`);
+    });
+  }
+
+  if (btnRunAiPreset && aiPromptInput) {
+    btnRunAiPreset.addEventListener('click', () => {
+      const q = aiPromptInput.value.trim() || 'Dolby Atmos style spatial concert clarity';
+      runKeylessAiDsp(q);
+    });
+
+    aiPromptInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        btnRunAiPreset.click();
+      }
+    });
+  }
+
+  // ==========================================
+  // 8. TAB NAVIGATION & BACKGROUND PLAYBACK
+  // ==========================================
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      ['radio-tab', 'ai-tab'].forEach(id => {
+        const panel = document.getElementById(id);
+        if (panel) panel.classList.add('hidden');
+      });
+      const targetPanel = document.getElementById(tab.dataset.tab);
+      if (targetPanel) targetPanel.classList.remove('hidden');
+    });
+  });
+
+  const btnPipMini = document.getElementById('btnPipMini');
+  if (btnPipMini) {
+    btnPipMini.addEventListener('click', () => {
+      if ('mediaSession' in navigator && audioElement) {
+        navigator.mediaSession.setActionHandler('play', () => audioElement.play());
+        navigator.mediaSession.setActionHandler('pause', () => audioElement.pause());
+      }
+      const insightBox = document.getElementById('aiInsightBox');
+      if (insightBox) {
+        insightBox.innerHTML =
+          '<strong><i class="fa-solid fa-headphones"></i> Background Media Session Armed:</strong> Lock-screen and background playback controls are active.';
+      }
+    });
+  }
+
+  // Boot EQ/Visualizer auto-sync and initial station directory
+  attachEqVisualizerAutoSync();
+  fetchRadioStations();
+})();
+</script>
 </body>
 </html>
